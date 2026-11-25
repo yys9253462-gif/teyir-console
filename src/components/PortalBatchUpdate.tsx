@@ -33,12 +33,14 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
   const [showAllResults, setShowAllResults] = useState(false)
   const running = batch?.status === 'running'
   const statusSeq = useRef(0)
+  const batchSelectSeq = useRef(0)
   const mountedRef = useRef(true)
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
       statusSeq.current++
+      batchSelectSeq.current++
     }
   }, [])
 
@@ -123,16 +125,19 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
     if (!await askConfirm(`确认更新 ${selected.length} 个节点的门户？\n\n逐台进行，每台门户会重启几秒，期间不影响用户上网。`)) return
     setStarting(true); setError('')
     try {
-      setBatch(await api.startPortalUpdateBatch(selected))
+      const nextBatch = await api.startPortalUpdateBatch(selected)
+      if (!mountedRef.current) return
+      setBatch(nextBatch)
       setSelected([])
       setShowAllResults(false)
-      api.portalUpdateBatchHistory().then(setHistory).catch(() => {})
+      api.portalUpdateBatchHistory().then((value) => { if (mountedRef.current) setHistory(value) }).catch(() => {})
       notify('已开始更新；可以关闭这个窗口，更新会在后台继续')
     } catch (err) {
+      if (!mountedRef.current) return
       setError(err instanceof Error ? err.message : String(err))
       // 若已有批次，展示它而不是诱导用户重复点击。
-      api.portalUpdateBatch('latest').then(setBatch).catch(() => {})
-    } finally { setStarting(false) }
+      api.portalUpdateBatch('latest').then((value) => { if (mountedRef.current) setBatch(value) }).catch(() => {})
+    } finally { if (mountedRef.current) setStarting(false) }
   }
 
   const counts = (batch?.results ?? []).reduce<Record<string, number>>((out, item) => {
@@ -149,13 +154,15 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
     const version = st.portal_version ? `门户 ${st.portal_version}` : ''
     if (st.error) return <small style={{ color: 'var(--muted)' }} title={st.error}>{version} · 无法检查</small>
     if (st.up_to_date === true) return <small style={{ color: 'var(--green)' }}>{version} · 已是最新</small>
-    if (st.up_to_date === false) return <small style={{ color: 'var(--amber-text)' }} title={`与最新版不同的文件：${st.outdated_files.join('、')}`}>{version} · 需要更新</small>
+    if (st.up_to_date === false) return <small style={{ color: 'var(--amber-text)' }} title={`与最新版不同的文件：${(st.outdated_files ?? []).join('、')}`}>{version} · 需要更新</small>
     return <small style={{ color: 'var(--muted)' }}>{version}</small>
   }
 
+  const repoUnconfigured = Boolean(status?.error?.includes('HY2_INSTALLER_REPO'))
+
   return <Modal title="批量更新门户" kicker="PORTAL BATCH UPDATE" wide onClose={onClose}>
     <div style={{ color: 'var(--text)', fontFamily: 'var(--sans)', fontSize: 'var(--fs-sm)', lineHeight: 1.65 }}>
-    <p>把节点上的管理门户更新到 GitHub 上的最新版。逐台进行，每台门户重启几秒，<strong>不影响用户上网</strong>，也不会升级 Hysteria 内核或改动用户。关闭窗口后更新会在后台继续。</p>
+    <p>把节点上的管理门户更新到环境变量 <code>HY2_INSTALLER_REPO</code> 对应仓库的最新版本。逐台进行，每台门户重启几秒，<strong>不影响用户上网</strong>，也不会升级 Hysteria 内核或改动用户。关闭窗口后更新会在后台继续。</p>
 
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center', margin: '4px 0 10px' }}>
       <span>
@@ -166,16 +173,27 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
       </span>
       <button className="button button-quiet" disabled={checking || running} onClick={() => void loadStatus(true)}>重新检查</button>
     </div>
+    {repoUnconfigured && (
+      <p className="form-note service-warn" style={{ marginBottom: 12 }}>
+        <span>开源自托管版本默认不绑定特定上游仓库。请在服务端环境变量中设置 <code>HY2_INSTALLER_REPO=owner/repo</code> 并重启后端，即可启用版本比对与批量更新。</span>
+      </p>
+    )}
 
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-      <button className="button button-quiet" disabled={running || starting || !outdated.length} onClick={() => setSelected(outdated.slice(0, 20).map(n => n.id))}>选择需要更新的（{outdated.length}）</button>
-      {batch && !running && retryable.length > 0 && <button className="button button-quiet" onClick={() => setSelected(retryable.map(item => item.node_id))}>选择上次未成功的（{retryable.length}）</button>}
-      <button className="button button-quiet" disabled={running || starting || !selected.length} onClick={() => setSelected([])}>清空选择</button>
+      <button className="button button-quiet" disabled={readOnly || running || starting || !outdated.length} onClick={() => setSelected(outdated.slice(0, 20).map(n => n.id))}>选择需要更新的（{outdated.length}）</button>
+      {batch && !running && retryable.length > 0 && <button className="button button-quiet" disabled={readOnly || starting} onClick={() => setSelected(retryable.slice(0, 20).map(item => item.node_id))}>选择上次未成功的（{retryable.length}）</button>}
+      <button className="button button-quiet" disabled={readOnly || running || starting || !selected.length} onClick={() => setSelected([])}>清空选择</button>
       <button className="button button-primary" disabled={readOnly || running || starting || !selected.length || selected.length > 20} onClick={() => void start()}>{starting ? '创建任务…' : running ? '后台更新中…' : `开始更新（${selected.length}）`}</button>
       {running && !readOnly && <button className="button button-quiet" disabled={batch?.cancel_requested} onClick={async () => {
         if (!batch || !await askConfirm('当前这台完成后，停止更新剩余节点？')) return
-        try { const result = await api.cancelPortalUpdateBatch(batch.id); notify(result.message); setBatch(await api.portalUpdateBatch(batch.id)) }
-        catch (err) { setError(err instanceof Error ? err.message : String(err)) }
+        try {
+          const result = await api.cancelPortalUpdateBatch(batch.id)
+          notify(result.message)
+          const latest = await api.portalUpdateBatch(batch.id)
+          if (mountedRef.current) setBatch(latest)
+        } catch (err) {
+          if (mountedRef.current) setError(err instanceof Error ? err.message : String(err))
+        }
       }}>{batch?.cancel_requested ? '已请求停止' : '停止剩余节点'}</button>}
     </div>
     {readOnly && <p>仅管理员可以发起或停止批量更新，当前账号只能查看进度。</p>}
@@ -183,7 +201,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
 
     <div style={{ display: 'grid', gap: 6, marginBottom: 18 }}>
       {nodes.map(node => <label key={node.id} style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-        <input type="checkbox" checked={selected.includes(node.id)} disabled={!node.has_basic || running || starting}
+        <input type="checkbox" checked={selected.includes(node.id)} disabled={readOnly || !node.has_basic || running || starting}
           onChange={e => setSelected(ids => e.target.checked ? [...ids, node.id] : ids.filter(id => id !== node.id))} />
         <span style={{ flexShrink: 0 }}>{node.name}</span>
         {badge(node)}
@@ -196,7 +214,18 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
     {batch && <section aria-label="更新任务进度" style={{ borderTop: '1px solid var(--line)', paddingTop: 12 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <h3 style={{ margin: 0 }}>{running ? '正在更新' : batch.status === 'interrupted' ? '上次更新被中断' : '上次更新结果'}</h3>
-        {history.length > 1 && <select value={batch.id} onChange={async e => { try { setBatch(await api.portalUpdateBatch(e.target.value)); setShowAllResults(false) } catch (err) { setError(err instanceof Error ? err.message : String(err)) } }}>
+        {history.length > 1 && <select value={batch.id} onChange={async e => {
+          const seq = ++batchSelectSeq.current
+          try {
+            const next = await api.portalUpdateBatch(e.target.value)
+            if (!mountedRef.current || seq !== batchSelectSeq.current) return
+            setBatch(next)
+            setShowAllResults(false)
+          } catch (err) {
+            if (!mountedRef.current || seq !== batchSelectSeq.current) return
+            setError(err instanceof Error ? err.message : String(err))
+          }
+        }}>
           {history.map(item => <option key={item.id} value={item.id}>{new Date(item.created_at).toLocaleString('zh-CN', { hour12: false })} · {batchStatusText[item.status] || item.status}</option>)}
         </select>}
       </div>
@@ -210,7 +239,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
         <small style={{ color: 'var(--muted)' }}> · {new Date(batch.updated_at).toLocaleString('zh-CN', { hour12: false })}</small>
       </p>
       {batch.status === 'interrupted' && <p role="alert">没跑完的节点不能算更新成功，请选中它们重新更新（重复更新是安全的）。</p>}
-      {!running && problemResults.length === 0 && <p style={{ color: 'var(--green)' }}>全部 {batch.results.length} 台都已更新并核验通过。</p>}
+      {!running && problemResults.length === 0 && <p style={{ color: 'var(--green)' }}>全部 {(batch.results ?? []).length} 台都已更新并核验通过。</p>}
       <div style={{ display: 'grid', gap: 8, marginTop: 8 }}>
         {visibleResults.map(item => <div key={item.node_id} style={{ border: '1px solid var(--line)', borderRadius: 8, padding: '8px 12px' }}>
           <strong>{item.name}</strong> · {batch.status === 'interrupted' && ['running', 'queued'].includes(item.status) ? '中断 / 未核验' : statusText[item.status] || item.status}
@@ -218,8 +247,8 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
           {item.error && <div role="alert" style={{ color: 'var(--amber-text)', overflowWrap: 'anywhere' }}>{item.error}</div>}
         </div>)}
       </div>
-      {!running && batch.results.length > problemResults.length && <button className="button button-quiet" style={{ marginTop: 8 }} onClick={() => setShowAllResults(v => !v)}>
-        {showAllResults ? '只看有问题的' : `显示全部 ${batch.results.length} 台的详情`}
+      {!running && (batch.results ?? []).length > problemResults.length && <button className="button button-quiet" style={{ marginTop: 8 }} onClick={() => setShowAllResults(v => !v)}>
+        {showAllResults ? '只看有问题的' : `显示全部 ${(batch.results ?? []).length} 台的详情`}
       </button>}
     </section>}
     </div>

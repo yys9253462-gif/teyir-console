@@ -5,6 +5,12 @@ import { askConfirm } from './ConfirmHost'
 
 // 系统设置里的三块（2026-10-16）：最近登录、定时巡检、商城接口签名。
 
+function formatFullTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
+
 export function RecentLogins() {
   const [items, setItems] = useState<LoginRecord[] | null>(null)
   const [policy, setPolicy] = useState('')
@@ -12,7 +18,7 @@ export function RecentLogins() {
   useEffect(() => {
     let alive = true
     // 2026-11-06：读取失败不能显示成「还没有记录」—— 那会让人以为最近没有登录，正是排查异地登录时最不该出现的结论。
-    api.myLogins().then((r) => { if (!alive) return; setItems(r.items); setPolicy(r.ban_policy); setLoadError('') })
+    api.myLogins().then((r) => { if (!alive) return; setItems(r.items ?? []); setPolicy(r.ban_policy); setLoadError('') })
       .catch((err) => { if (!alive) return; setItems([]); setLoadError(err instanceof Error ? err.message : '读取失败') })
     return () => { alive = false }
   }, [])
@@ -27,8 +33,8 @@ export function RecentLogins() {
             <tr key={it.ip}>
               <td><span className="traffic-value">{it.ip}</span>{it.current && <span className="status-pill online" style={{ marginLeft: 6 }}>当前</span>}</td>
               <td><span className="traffic-sub" title={it.user_agent}>{shortUA(it.user_agent)}</span></td>
-              <td><span className="traffic-sub">{new Date(it.first_seen_at).toLocaleString('zh-CN', { hour12: false })}</span></td>
-              <td><span className="traffic-sub">{new Date(it.last_seen_at).toLocaleString('zh-CN', { hour12: false })}</span></td>
+              <td><span className="traffic-sub">{formatFullTime(it.first_seen_at)}</span></td>
+              <td><span className="traffic-sub">{formatFullTime(it.last_seen_at)}</span></td>
               <td><span className="traffic-sub">{it.login_count}</span></td>
             </tr>
           ))}</tbody>
@@ -53,22 +59,25 @@ export function SchedulesCard({ notify }: { notify: (m: string) => void }) {
   // 2026-11-06：读取失败要显示出来。原来静默吞掉，列表为空，看起来像「没有任何定时巡检」。
   const [loadError, setLoadError] = useState('')
   const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
   const refreshTimerRef = useRef<number | undefined>(undefined)
   useEffect(() => {
     mountedRef.current = true
     return () => {
       mountedRef.current = false
+      loadSeq.current += 1
       window.clearTimeout(refreshTimerRef.current)
     }
   }, [])
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const r = await api.schedules()
-      if (!mountedRef.current) return
-      setItems(r.items); setTg(r.telegram_configured); setLoadError('')
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setItems(r.items ?? []); setTg(r.telegram_configured); setLoadError('')
     } catch (err) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setLoadError(err instanceof Error ? err.message : '读取失败')
     }
   }, [])
@@ -80,29 +89,46 @@ export function SchedulesCard({ notify }: { notify: (m: string) => void }) {
     const timer = window.setInterval(() => {
       if (!document.hidden) void load()
     }, 5000)
-    return () => window.clearInterval(timer)
+    const onVisible = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [anyRunning, load])
 
   async function toggle(it: ScheduleItem) {
-    if (!admin) return
-    setBusy(it.key)
-    try { const r = await api.setSchedule(it.key, !it.enabled); if (mountedRef.current) setItems(r.items) } catch (err) { notify(err instanceof Error ? err.message : '设置失败') } finally { if (mountedRef.current) setBusy('') }
-  }
-  async function runNow(it: ScheduleItem) {
-    if (!admin) return
+    if (!admin || busy) return
     setBusy(it.key)
     try {
-      await api.runSchedule(it.key)
-      notify(`已开始「${it.label}」，结果有变化会推送到 Telegram`)
-      window.clearTimeout(refreshTimerRef.current)
-      refreshTimerRef.current = window.setTimeout(() => { void load() }, 1500)
+      const r = await api.setSchedule(it.key, !it.enabled)
+      if (mountedRef.current) setItems(r.items ?? [])
     } catch (err) {
-      notify(err instanceof Error ? err.message : '启动失败')
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '设置失败')
     } finally {
       if (mountedRef.current) setBusy('')
     }
   }
-  const fmt = (t: string | null) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—')
+  async function runNow(it: ScheduleItem) {
+    if (!admin || busy) return
+    setBusy(it.key)
+    try {
+      await api.runSchedule(it.key)
+      if (!mountedRef.current) return
+      notify(`已开始「${it.label}」，结果有变化会推送到 Telegram`)
+      window.clearTimeout(refreshTimerRef.current)
+      refreshTimerRef.current = window.setTimeout(() => { if (mountedRef.current) void load() }, 1500)
+    } catch (err) {
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '启动失败')
+    } finally {
+      if (mountedRef.current) setBusy('')
+    }
+  }
+  const fmt = (t: string | null) => {
+    if (!t) return '—'
+    const d = new Date(t)
+    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+  }
 
   return (
     <section className="panel settings-panel">
@@ -162,20 +188,31 @@ export function StoreSignatureCard({ notify }: { notify: (m: string) => void }) 
   const admin = isAdminSession()
   const [required, setRequired] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
+  const mountedRef = useRef(true)
   useEffect(() => {
-    let alive = true
+    mountedRef.current = true
     api.storeSignature()
-      .then((r) => { if (alive) setRequired(r.required) })
-      .catch((err) => { if (alive) notify(err instanceof Error ? err.message : '签名设置加载失败') })
-    return () => { alive = false }
+      .then((r) => { if (mountedRef.current) setRequired(r.required) })
+      .catch((err) => { if (mountedRef.current) notify(err instanceof Error ? err.message : '签名设置加载失败') })
+    return () => { mountedRef.current = false }
   }, [notify])
   async function toggle() {
-    if (!admin || required === null) return
+    if (!admin || busy || required === null) return
     if (!required && !await askConfirm('开启后，没带签名的商城请求都会被拒绝。\n请确认商城已经按下面的示例改好并测试通过，否则下单会失败。')) return
     // 2026-11-06：关闭也要确认：关掉后只凭对接密钥就能调商城接口（下单、续费、撤单），密钥泄露即可伪造请求。
     if (required && !await askConfirm('关闭强制签名？\n关闭后只凭对接密钥就能调用下单、续费、撤单接口，密钥一旦泄露即可伪造商城请求。', { danger: true })) return
+    if (!mountedRef.current) return
     setBusy(true)
-    try { const r = await api.setStoreSignature(!required); setRequired(r.required); notify(r.required ? '已开启强制签名' : '已关闭强制签名') } catch (err) { notify(err instanceof Error ? err.message : '设置失败') } finally { setBusy(false) }
+    try {
+      const r = await api.setStoreSignature(!required)
+      if (!mountedRef.current) return
+      setRequired(r.required)
+      notify(r.required ? '已开启强制签名' : '已关闭强制签名')
+    } catch (err) {
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '设置失败')
+    } finally {
+      if (mountedRef.current) setBusy(false)
+    }
   }
   return (
     <section className="panel settings-panel">
@@ -207,34 +244,41 @@ export function DeliveryDomainCard({ notify }: { notify: (m: string) => void }) 
   const [nameDraft, setNameDraft] = useState('')
   const [nameError, setNameError] = useState('')
   const [loadError, setLoadError] = useState('')
+  const mountedRef = useRef(true)
   useEffect(() => {
-    let alive = true
+    mountedRef.current = true
     api.deliveryDomain()
-      .then((r) => { if (!alive) return; setState(r); setNameDraft(r.name); setDraft(r.value.replace(/^https:\/\//, '')); setLoadError('') })
-      .catch((err) => { if (!alive) return; const m = err instanceof Error ? err.message : '交付域名加载失败'; setLoadError(m); notify(m) })
-    return () => { alive = false }
+      .then((r) => { if (!mountedRef.current) return; setState(r); setNameDraft(r.name); setDraft(r.value.replace(/^https:\/\//, '')); setLoadError('') })
+      .catch((err) => { if (!mountedRef.current) return; const m = err instanceof Error ? err.message : '交付域名加载失败'; setLoadError(m); notify(m) })
+    return () => { mountedRef.current = false }
   }, [notify])
   async function save(value: string) {
-    if (!admin) return
+    if (!admin || busy) return
     setBusy(true); setError('')
     try {
       const r = await api.setDeliveryDomain(value)
+      if (!mountedRef.current) return
       setState(r); setDraft(r.value.replace(/^https:\/\//, ''))
       notify(value ? `交付域名已改为 ${r.effective}，之后发货的链接都用它` : '已清除，恢复默认域名')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '保存失败')
-    } finally { setBusy(false) }
+      if (mountedRef.current) setError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      if (mountedRef.current) setBusy(false)
+    }
   }
   async function saveName() {
-    if (!admin) return
+    if (!admin || busy) return
     setBusy(true); setNameError('')
     try {
       const r = await api.setSubscriptionName(nameDraft.trim())
+      if (!mountedRef.current) return
       setState(r); setNameDraft(r.name)
       notify(`订阅显示名称已改为「${r.name}」，之后发货的链接导入后就叫这个`)
     } catch (err) {
-      setNameError(err instanceof Error ? err.message : '保存失败')
-    } finally { setBusy(false) }
+      if (mountedRef.current) setNameError(err instanceof Error ? err.message : '保存失败')
+    } finally {
+      if (mountedRef.current) setBusy(false)
+    }
   }
   const sourceLabel = state?.source === 'setting' ? '控制台设置' : state?.source === 'env' ? '环境变量' : '面板访问域名（默认）'
   const normalizedDraft = normalizeDomainDraft(draft)

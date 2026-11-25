@@ -14,7 +14,7 @@ import { ServiceControlPanel } from './components/ServiceControlPanel'
 import { AppearancePicker } from './components/AppearancePicker'
 import { HostTrend } from './components/HostTools'
 import { WhatsNewBanner } from './components/HostToolbox'
-import { Modal } from './components/Modal'
+import { hasOpenModal, Modal } from './components/Modal'
 import { ConfirmHost } from './components/ConfirmHost'
 import { ErrorBoundary, ViewLoadingFallback } from './components/ErrorBoundary'
 
@@ -124,7 +124,8 @@ function operationLabel(operation: string): string {
 }
 
 function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('zh-CN', { hour12: false })
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
 type SearchCandidate = {
@@ -162,6 +163,7 @@ function App() {
   const [error, setError] = useState<string | null>(null)
   const [session, setSession] = useState(() => loadSession())
   const adminCan = session?.role === 'admin'
+  const isViewer = session?.role === 'viewer'
 
   // 会话代数：登出或会话失效时递增，拦截在途旧请求的晚到响应，杜绝跨账号串数据。
   const sessionEpoch = useRef(0)
@@ -181,6 +183,13 @@ function App() {
     setMetrics({})
     setError(null)
     setSearchOpen(false)
+    setPendingHostDelete(null)
+    setPendingCredDelete(null)
+    setAppearanceOpen(false)
+    setHelpOpen(false)
+    setSidebarOpen(false)
+    setKeyInput('')
+    setRotatingCred(false)
   }, [])
 
   // 任何请求拿到 401（令牌过期 / 账号被停用）都回到登录页并清空状态。
@@ -338,6 +347,8 @@ function App() {
       }
       if (
         event.key === 'Escape' &&
+        !event.defaultPrevented &&
+        !hasOpenModal() &&
         selected &&
         !searchOpen &&
         !pendingHostDelete &&
@@ -345,6 +356,8 @@ function App() {
         !appearanceOpen &&
         !helpOpen
       ) {
+        // 焦点位于交互式 SSH 终端内时，将 Esc 键保留给远端程序（如 vim / less），禁止直接关掉抽屉断开终端。
+        if (event.target instanceof Element && event.target.closest('.host-terminal, .xterm')) return
         event.preventDefault()
         setSelected(null)
       }
@@ -416,12 +429,16 @@ function App() {
   const safeSearchCursor = searchCandidates.length > 0 ? Math.min(searchCursor, searchCandidates.length - 1) : 0
 
   async function runAction(action: ServiceOperation, server: Server, unit = 'hysteria-server') {
+    if (isViewer || busy) return
+    setBusy(true)
     try {
       await api.createTask({ server_id: server.id, operation_type: action, parameters: { source: 'console', unit } })
       showToast(`已下发：${operationLabel(action)} · ${server.name}（执行器约 20 秒内领取）`)
       await refresh()
     } catch (err) {
       showToast(err instanceof Error ? `任务创建失败：${err.message}` : '任务创建失败', 'error')
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -434,6 +451,7 @@ function App() {
     try {
       await api.uploadCredential(server.id, credAuth, credAuth === 'ssh_key' ? `${keyInput.trimEnd()}\n` : keyInput.trim())
       setKeyInput('')
+      setRotatingCred(false)
       showToast(`凭据已加密保存：${server.name}`)
       await refresh()
     } catch (err) {
@@ -700,19 +718,19 @@ function App() {
             {(!selected.has_credential || rotatingCred) && (
               <label className="login-field" style={{ marginTop: 14 }}>
                 <span>SSH 认证方式</span>
-                <select value={credAuth} onChange={(event) => setCredAuth(event.target.value as 'ssh_key' | 'password')}>
+                <select value={credAuth} disabled={busy || !adminCan} onChange={(event) => setCredAuth(event.target.value as 'ssh_key' | 'password')}>
                   <option value="ssh_key">私钥（PEM，推荐）</option>
                   <option value="password">密码</option>
                 </select>
               </label>
             )}
             {(!selected.has_credential || rotatingCred) && (credAuth === 'ssh_key'
-              ? <label className="login-field" style={{ marginTop: 10 }}><span>SSH 私钥（仅用于本次加密存储）</span><textarea className="key-input" rows={4} spellCheck={false} value={keyInput} onChange={(event) => setKeyInput(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></label>
-              : <label className="login-field" style={{ marginTop: 10 }}><span>SSH 密码</span><input type="password" value={keyInput} onChange={(event) => setKeyInput(event.target.value)} autoComplete="off" /></label>)}
+              ? <label className="login-field" style={{ marginTop: 10 }}><span>SSH 私钥（仅用于本次加密存储）</span><textarea className="key-input" rows={4} spellCheck={false} disabled={busy || !adminCan} value={keyInput} onChange={(event) => setKeyInput(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></label>
+              : <label className="login-field" style={{ marginTop: 10 }}><span>SSH 密码</span><input type="password" disabled={busy || !adminCan} value={keyInput} onChange={(event) => setKeyInput(event.target.value)} autoComplete="off" /></label>)}
             {selected.has_credential && (
               <label className="login-field" style={{ marginTop: 14 }}>
                 <span>允许写操作的服务白名单（逗号分隔，仅这些服务单元可被重启）</span>
-                <input value={unitsInput} onChange={(event) => setUnitsInput(event.target.value)} spellCheck={false} placeholder="hysteria-server" disabled={busy} />
+                <input value={unitsInput} onChange={(event) => setUnitsInput(event.target.value)} spellCheck={false} placeholder="hysteria-server" disabled={busy || !adminCan} />
               </label>
             )}
             <ServiceControlPanel server={selected} notify={showToast} />
@@ -720,8 +738,8 @@ function App() {
               {!selected.has_credential && <button className="button button-primary" disabled={busy || !adminCan} title={adminCan ? undefined : ADMIN_HOST_HINT} onClick={() => attachCredential(selected)}><ShieldCheck size={15} />保存凭据</button>}
               {selected.has_credential && (
                 <>
-                  <button className="button button-quiet" onClick={() => runAction('health_check', selected)}><RefreshCw size={15} />健康检查</button>
-                  <button className="button button-quiet" onClick={() => runAction('logs', selected)}><ListFilter size={15} />拉取日志</button>
+                  <button className="button button-quiet" disabled={busy || isViewer} title={isViewer ? '只读账号不能下发运维任务' : undefined} onClick={() => runAction('health_check', selected)}><RefreshCw size={15} />健康检查</button>
+                  <button className="button button-quiet" disabled={busy || isViewer} title={isViewer ? '只读账号不能下发运维任务' : undefined} onClick={() => runAction('logs', selected)}><ListFilter size={15} />拉取日志</button>
                   <button className={`button ${selected.allow_write_ops ? 'button-primary' : 'button-quiet'}`} disabled={busy || !adminCan} title={adminCan ? undefined : ADMIN_HOST_HINT} onClick={() => toggleWriteOps(selected, !selected.allow_write_ops)}><ShieldCheck size={15} />{selected.allow_write_ops ? '关闭写操作' : '开启写操作'}</button>
                   <button className="button button-quiet" disabled={busy || !adminCan} title={adminCan ? undefined : ADMIN_HOST_HINT} onClick={() => setRotatingCred((current) => !current)}><KeyRound size={15} />{rotatingCred ? '取消轮换' : '轮换凭据'}</button>
                   {rotatingCred && <button className="button button-primary" disabled={busy || !adminCan} title={adminCan ? undefined : ADMIN_HOST_HINT} onClick={() => attachCredential(selected)}><ShieldCheck size={15} />保存新凭据</button>}
@@ -800,14 +818,14 @@ function App() {
       {pendingHostDelete && (
         <Modal title="删除主机" kicker="危险操作确认" onClose={() => setPendingHostDelete(null)}>
           <p className="form-note">即将删除主机 <strong>{pendingHostDelete.name}</strong>（{pendingHostDelete.host}）。软删除后历史指标与任务仍保留；若其下仍有节点需先在 HY2 节点页删除。</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={() => setPendingHostDelete(null)}>取消</button><button className="button button-primary" onClick={confirmRemoveServer}>确认删除</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={busy} onClick={() => setPendingHostDelete(null)}>取消</button><button className="button button-danger" disabled={busy} onClick={confirmRemoveServer}>确认删除</button></div>
         </Modal>
       )}
 
       {pendingCredDelete && (
         <Modal title="删除 SSH 凭据" kicker="危险操作确认" onClose={() => setPendingCredDelete(null)}>
           <p className="form-note">即将删除主机 <strong>{pendingCredDelete.name}</strong>（{pendingCredDelete.host}）的加密凭据。删除后采集器与执行器都无法再连接该主机，节点会显示为未知；历史指标与任务记录保留。</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={() => setPendingCredDelete(null)}>取消</button><button className="button button-primary" onClick={removeCredential}>确认删除凭据</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={busy} onClick={() => setPendingCredDelete(null)}>取消</button><button className="button button-danger" disabled={busy} onClick={removeCredential}>确认删除凭据</button></div>
         </Modal>
       )}
 
@@ -849,18 +867,20 @@ function App() {
 }
 
 function DrawerMetric({ icon, label, value, percent }: { icon: React.ReactNode; label: string; value: string; percent: number }) {
-  return <div className="drawer-metric"><div><span className="drawer-metric-icon">{icon}</span><span>{label}</span><strong>{value}</strong></div><div className="drawer-meter"><i style={{ width: `${percent}%` }} /></div></div>
+  const safePercent = Number.isFinite(percent) ? Math.min(100, Math.max(0, percent)) : 0
+  return <div className="drawer-metric"><div><span className="drawer-metric-icon">{icon}</span><span>{label}</span><strong>{value}</strong></div><div className="drawer-meter"><i style={{ width: `${safePercent}%` }} /></div></div>
 }
 
 function Sparkline({ values, color = 'var(--green)' }: { values: number[]; color?: string }) {
-  if (values.length < 2) return <div className="sparkline-empty">—</div>
+  const clean = values.filter((v) => Number.isFinite(v))
+  if (clean.length < 2) return <div className="sparkline-empty">—</div>
   const width = 120
   const height = 36
-  const max = Math.max(...values, 1)
-  const min = Math.min(...values, 0)
+  const max = Math.max(...clean, 1)
+  const min = Math.min(...clean, 0)
   const range = Math.max(max - min, 1)
-  const points = values.map((value, index) => {
-    const x = (index / (values.length - 1)) * width
+  const points = clean.map((value, index) => {
+    const x = (index / (clean.length - 1)) * width
     const y = height - ((value - min) / range) * height
     return `${x.toFixed(1)},${y.toFixed(1)}`
   })

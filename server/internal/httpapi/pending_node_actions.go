@@ -183,21 +183,43 @@ func (s *Server) runPendingNodeAction(ctx context.Context, subID, action string,
 
 func (s *Server) finishPendingNodeAction(ctx context.Context, rec *subscriptionRecord, thenDelete, registerRevoked bool) {
 	if thenDelete {
+		// 将软删订阅、登记撤销订单黑名单与清理待办动作合并在同一事务中，
+		// 杜绝「订阅已软删但黑名单写入失败却清理待办」导致已退款订单可被重放复活。
+		txCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		tx, err := s.db.Begin(txCtx)
+		if err != nil {
+			s.bumpPendingNodeAction(ctx, rec.ID, "节点已回收，但开启结案事务失败："+err.Error())
+			return
+		}
+		defer tx.Rollback(txCtx)
 		// 兜底条件：只软删仍未生效的行（续费后的行绝不能被这里删掉）。
-		tag, err := s.db.Exec(ctx, `UPDATE subscription_tokens SET deleted_at=now() WHERE id=$1::uuid AND deleted_at IS NULL
+		tag, err := tx.Exec(txCtx, `UPDATE subscription_tokens SET deleted_at=now() WHERE id=$1::uuid AND deleted_at IS NULL
 		   AND NOT (enabled AND (expires_at IS NULL OR expires_at > now()))`, rec.ID)
 		if err != nil {
 			s.bumpPendingNodeAction(ctx, rec.ID, "节点已回收，但标记删除失败："+err.Error())
 			return
 		}
-		// 2026-11-06：商城撤单（回收后删除）在后台补完时同样登记撤销的订单号，
-		// 否则同一 order_id 的重试下单会再开一份订阅（见迁移 056）。只登记商城撤单来源的待办（迁移 058）：
-		// 订阅中心手动删除不是退款，买家之后续费重新下单必须照常可用。
+		// 商城撤单（回收后删除）在后台补完时同样登记撤销的订单号，
+		// 否则同一 order_id 的重试下单会再开一份订阅；只登记商城撤单来源的待办。
 		if registerRevoked && tag.RowsAffected() == 1 && strings.TrimSpace(rec.OrderID) != "" {
-			if _, err := s.db.Exec(ctx, `INSERT INTO store_revoked_orders(order_id, subscription_id) VALUES($1, $2::uuid) ON CONFLICT (order_id) DO NOTHING`, rec.OrderID, rec.ID); err != nil {
-				s.logger.Error("pending node action: 登记已撤销订单号失败，同一订单号重新下单会再开通", "subscription", shortID(rec.ID), "order_id", rec.OrderID, "error", err)
+			if _, err := tx.Exec(txCtx, `INSERT INTO store_revoked_orders(order_id, subscription_id) VALUES($1, $2::uuid) ON CONFLICT (order_id) DO NOTHING`, rec.OrderID, rec.ID); err != nil {
+				s.logger.Error("pending node action: 登记已撤销订单号失败，已回滚待重试", "subscription", shortID(rec.ID), "order_id", rec.OrderID, "error", err)
+				s.bumpPendingNodeAction(ctx, rec.ID, "登记已撤销订单号失败："+err.Error())
+				return
 			}
 		}
+		if _, err := tx.Exec(txCtx, `DELETE FROM subscription_pending_node_actions WHERE subscription_id=$1::uuid`, rec.ID); err != nil {
+			s.bumpPendingNodeAction(ctx, rec.ID, "清理待办动作记录失败："+err.Error())
+			return
+		}
+		if err := tx.Commit(txCtx); err != nil {
+			s.bumpPendingNodeAction(ctx, rec.ID, "提交结案事务失败："+err.Error())
+			return
+		}
+		InvalidateSubscriptionCache()
+		s.logger.Info("pending node action done: accounts revoked on every node", "subscription", shortID(rec.ID), "deleted", thenDelete)
+		return
 	}
 	s.cancelPendingNodeAction(ctx, rec.ID)
 	s.logger.Info("pending node action done: accounts revoked on every node", "subscription", shortID(rec.ID), "deleted", thenDelete)

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -70,6 +71,7 @@ func (s *Server) subIdsAggregate(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		n.APIKey = string(apiKey)
+		clear(apiKey)
 		nodes = append(nodes, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -92,9 +94,17 @@ func (s *Server) subIdsAggregate(w http.ResponseWriter, r *http.Request) {
 	sem := make(chan struct{}, provisioningConcurrency)
 	for _, n := range nodes {
 		go func(n nodeRow) {
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			envelope, err := portalCall(r.Context(), n.BaseURL, n.APIKey, http.MethodGet, "/users/list", nil)
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-r.Context().Done():
+				ch <- result{nodeID: n.NodeID, nodeName: n.NodeName, err: "请求已取消"}
+				return
+			}
+			// 每个节点施加独立超时预算，避免单台挂死节点拖垮整个聚合请求。
+			callCtx, cancel := context.WithTimeout(r.Context(), provisionTimeout)
+			envelope, err := portalCall(callCtx, n.BaseURL, n.APIKey, http.MethodGet, "/users/list", nil)
+			cancel()
 			if err != nil {
 				ch <- result{nodeID: n.NodeID, nodeName: n.NodeName, err: err.Error()}
 				return
@@ -122,6 +132,9 @@ func (s *Server) subIdsAggregate(w http.ResponseWriter, r *http.Request) {
 		case res := <-ch:
 			results = append(results, res)
 			collected++
+		case <-r.Context().Done():
+			writeJSON(w, statusClientClosedRequest, map[string]string{"error": "client closed request"})
+			return
 		case <-timeout.C:
 			s.logger.Warn("subIds: 部分节点超时", "got", collected, "want", len(nodes))
 			writeJSON(w, http.StatusGatewayTimeout, map[string]string{
@@ -149,7 +162,11 @@ func (s *Server) subIdsAggregate(w http.ResponseWriter, r *http.Request) {
 	errorsInResults := 0
 	for _, res := range results {
 		if res.err != "" {
-			nodeErrors[res.nodeName] = res.err
+			key := res.nodeName
+			if _, exists := nodeErrors[key]; exists {
+				key = fmt.Sprintf("%s (%s)", res.nodeName, shortID(res.nodeID))
+			}
+			nodeErrors[key] = res.err
 			errorsInResults++
 			continue
 		}

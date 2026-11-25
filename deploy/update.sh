@@ -10,9 +10,7 @@
 #
 # 顺序不能换：
 #   1. git fetch + reset --hard        —— 只改磁盘，不影响在跑的容器
-#   2. docker compose build migrate    —— 迁移文件是通过构建上下文进镜像的。
-#                                         不先重建就 run migrate，跑的还是旧镜像里的旧文件，
-#                                         表现是「迁移静默没生效，applied 数量不变」。
+#   2. docker compose build migrate    —— 迁移器与迁移文件同步重建
 #   3. docker compose run --rm migrate
 #   4. docker compose up -d --build api
 #      docker compose up -d --build web
@@ -64,13 +62,39 @@ if grep -Eq '^[[:space:]]*-[[:space:]]*[^#]*:/api(:ro|:rw)?[[:space:]]*$' docker
   exit 1
 fi
 
-# 健康检查端口从 .env 读，不要写死：线上曾经是 8080，而脚本里写死过 18080，
-# 于是每次部署都以「健康检查超时」收场，其实服务早就起来了。
+# 从 .env 读取配置项：兼容前后空白、单双引号与行内注释，并去除 CR 回车符。
 read_env() {
-  sed -n "s/^[[:space:]]*$1=//p" .env 2>/dev/null | tail -1 | tr -d '"' | tr -d "[:space:]" || true
+  local raw
+  raw="$(sed -n "s/^[[:space:]]*$1=//p" .env 2>/dev/null | tail -1 | tr -d '\r' || true)"
+  # 剥离未加引号时的行内注释（空白后的 # 开头部分）
+  raw="${raw%%[[:space:]]#*}"
+  # 去除首尾空白与外层单双引号
+  raw="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+  printf '%s' "$raw"
 }
+
+# 将监听地址规范化为健康检查可直连的主机地址（兼容通配地址与 IPv6 字面量）。
+resolve_health_host() {
+  local bind="$1"
+  case "$bind" in
+    ""|"0.0.0.0"|"::"|"[::]"|"*")
+      printf '127.0.0.1'
+      ;;
+    \[*\])
+      printf '%s' "$bind"
+      ;;
+    *:*)
+      printf '[%s]' "$bind"
+      ;;
+    *)
+      printf '%s' "$bind"
+      ;;
+  esac
+}
+
 API_PORT="$(read_env API_PORT)"; API_PORT="${API_PORT:-8080}"
 API_BIND="$(read_env API_BIND)"; API_BIND="${API_BIND:-127.0.0.1}"
+HEALTH_HOST="$(resolve_health_host "$API_BIND")"
 
 BEFORE="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
 log "当前版本: $BEFORE"
@@ -147,14 +171,20 @@ log "目标版本: $AFTER"
 
 # 换行符兜底：.gitattributes 只在「重新检出」时才作用于工作区。若某次拷贝把 CRLF
 # 带了进来，git 会因 index 一致而不去碰它，结果就是 compose / Caddy 读到带 CR 的配置。
-for f in docker-compose.yml .gitattributes Caddyfile; do
-  if [ -f "$f" ] && grep -q $'\r' "$f" 2>/dev/null; then
+has_cr() {
+  [ -f "$1" ] && [ "$(tr -cd '\r' < "$1" | wc -c)" -gt 0 ]
+}
+for f in docker-compose.yml .gitattributes Caddyfile deploy/update.sh; do
+  if has_cr "$f"; then
     warn "$f 含 CRLF，强制重新检出以套用 .gitattributes"
     rm -f .git/index
     git reset --hard HEAD >/dev/null
     break
   fi
 done
+if has_cr ".env"; then
+  warn "检测到 .env 含 CRLF 回车符，建议转换为 LF 以避免环境变量解析异常"
+fi
 
 # ------------------------------------------------------------------ 迁移
 migration_count() {
@@ -166,12 +196,19 @@ log "确保 db 在跑"
 docker compose up -d db >/dev/null
 # 2026-11-04：等库真的能连再往下。db 容器被重建（镜像标签变了）时，紧接着的 psql 会失败，
 # 迁移计数拿到 "?"，后面的算术在 set -e 下直接让脚本退出 —— 迁移已跑、api 却没重建。
+db_ready=0
 for _ in $(seq 1 30); do
   if docker compose exec -T db pg_isready -U nodeops -d nodeops >/dev/null 2>&1; then
+    db_ready=1
     break
   fi
   sleep 2
 done
+if [ "$db_ready" -ne 1 ]; then
+  warn "等待数据库就绪超时（60s），中止迁移与发布。最近 db 日志："
+  docker compose logs --tail=40 db >&2 || true
+  exit 1
+fi
 
 MIG_BEFORE="$(migration_count)"
 log "已应用迁移数: $MIG_BEFORE"
@@ -180,19 +217,24 @@ log "已应用迁移数: $MIG_BEFORE"
 #
 # 原脚本只备份代码目录（tar .），而迁移改的是库。迁移文件虽然是"逐文件事务 +
 # 台账"，但一旦某条迁移把表改坏（或磁盘写满导致中途失败），没有库快照就只能靠
-# 手工回滚。实测这次部署前我自己手工 pg_dump 过两次 —— 说明这一步本来就该在脚本里。
-# 用 DEPLOY_NO_DB_BACKUP=1 可跳过（明确知情时的快速迭代）。
+# 手工回滚。用 DEPLOY_NO_DB_BACKUP=1 可跳过（明确知情时的快速迭代）。
 if [ "${DEPLOY_NO_DB_BACKUP:-0}" = "1" ]; then
   log "跳过数据库备份（DEPLOY_NO_DB_BACKUP=1）"
 else
   DUMP="$BACKUP_DIR/$PROJECT-db-$STAMP.dump"
+  DUMP_ERR="$(mktemp)"
   log "备份数据库到 $DUMP"
-  if docker compose exec -T db pg_dump -U nodeops -d nodeops > "$DUMP" 2>/dev/null && [ -s "$DUMP" ]; then
+  if docker compose exec -T db pg_dump -U nodeops -d nodeops > "$DUMP" 2>"$DUMP_ERR" && [ -s "$DUMP" ]; then
+    rm -f "$DUMP_ERR"
     log "数据库备份完成: $(du -h "$DUMP" | cut -f1)"
     ls -1t "$BACKUP_DIR/$PROJECT-db-"*.dump 2>/dev/null | tail -n +4 | xargs -r rm -f
   else
     rm -f "$DUMP"
     warn "数据库备份失败；为避免「改坏了没有退路」，本次不继续迁移"
+    if [ -s "$DUMP_ERR" ]; then
+      sed 's/^/    /' "$DUMP_ERR" >&2 || true
+    fi
+    rm -f "$DUMP_ERR"
     warn "确认可以冒险时用 DEPLOY_NO_DB_BACKUP=1 重跑"
     exit 1
   fi
@@ -221,20 +263,16 @@ log "重建并重启 api"
 docker compose up -d --build api
 
 # ⚠️ 2026-10-31：web 也必须重建。
-#
-# 原来这里只有 api，web 在后面用 `up -d --no-build --pull never web` 起旧镜像 ——
-# 而 web 里装的是前端静态资源（Dockerfile.web 里跑 npm run build）。
-# 于是**只改前端的提交永远上不了线**：确实部署了、api 也重启了，
-# 但浏览器拿到的还是旧 bundle。实测踩到过一次（改了节点页却看不到变化）。
+# 原来这里只有 api，web 用旧镜像启动会导致前端静态资源改动无法上线。
 log "重建并重启 web（前端静态资源）"
 docker compose up -d --build web
 
-# 商城 API 属另一个 Compose 项目；external 网络必须已存在，不在此处启动。
+# 外部商城服务属另一个编排项目；external 网络必须已存在，不在此处启动。
 # web 已在上面 `up -d --build web` 重建，这里不再重复操作。
 
-log "等待健康 ($API_BIND:$API_PORT/api/health)"
+log "等待健康 ($HEALTH_HOST:$API_PORT/api/health)"
 for _ in $(seq 1 45); do
-  code="$(curl -s -o /dev/null -w '%{http_code}' "http://$API_BIND:$API_PORT/api/health" || echo 000)"
+  code="$(curl --noproxy '*' --max-time 5 -s -o /dev/null -w '%{http_code}' "http://$HEALTH_HOST:$API_PORT/api/health" || echo 000)"
   if [ "$code" = "200" ]; then
     log "健康 OK"
     log "部署完成: $BEFORE -> $AFTER"

@@ -172,7 +172,10 @@ WHERE id=$1::uuid`, id, reason); err != nil {
 		}
 	}
 	markResolved := func(note string) error {
-		_, err := s.db.Exec(r.Context(), `
+		// 节点删号已确认完成后使用脱离客户端取消的独立短超时回写数据库，避免状态丢失。
+		persistCtx, cancelPersist := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		defer cancelPersist()
+		_, err := s.db.Exec(persistCtx, `
 UPDATE orphan_node_accounts SET resolved_at = now(), resolved_note = $2,
        attempts = attempts + 1, last_attempt_at = now()
 WHERE id=$1::uuid`, id, note)

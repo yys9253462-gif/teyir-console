@@ -213,12 +213,33 @@ func validTargetHost(host string) bool {
 	if strings.ContainsAny(trimmed, " \t\n\r;|&$`(){}[]<>'\"\\!*?~#") {
 		return false
 	}
-	// 只允许字母、数字、点、冒号、连字符（覆盖 IPv4/IPv6/域名）。
-	for _, r := range trimmed {
-		ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-			(r >= '0' && r <= '9') || r == '.' || r == ':' || r == '-'
-		if !ok {
+	// 合法 IPv4 / IPv6 字面量直接放行（排除带区域标识等非标准格式）。
+	if ip := net.ParseIP(trimmed); ip != nil {
+		return true
+	}
+	// 非 IP 主机名严禁以连字符开头或结尾（防止拼入 ping 时被解析为命令行选项，如 -f / --flood），
+	// 且不能包含冒号或连续点号，每个标签首尾须为字母或数字。
+	if strings.HasPrefix(trimmed, "-") || strings.HasSuffix(trimmed, "-") ||
+		strings.Contains(trimmed, ":") || strings.HasPrefix(trimmed, ".") || strings.Contains(trimmed, "..") {
+		return false
+	}
+	hostname := strings.TrimSuffix(trimmed, ".")
+	if hostname == "" {
+		return false
+	}
+	for _, label := range strings.Split(hostname, ".") {
+		if label == "" || len(label) > 63 {
 			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, r := range label {
+			ok := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+				(r >= '0' && r <= '9') || r == '-'
+			if !ok {
+				return false
+			}
 		}
 	}
 	return true

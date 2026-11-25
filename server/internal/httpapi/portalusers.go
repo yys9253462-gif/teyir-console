@@ -197,8 +197,8 @@ func (s *Server) portalCreateUser(w http.ResponseWriter, r *http.Request) {
 	userID := strings.TrimSpace(input.UserID)
 	// An omitted user_id is legitimate: the portal generates one. But a supplied
 	// one must be safe to put in a URL path.
-	if userID != "" && !portalUserIDPattern.MatchString(userID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户 ID 只能是 1-64 位的字母、数字、下划线、短横线或点"})
+	if userID != "" && (userID == "." || userID == ".." || !portalUserIDPattern.MatchString(userID)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户 ID 只能是 1-64 位的字母、数字、下划线、短横线或点，且不能为 . 或 .."})
 		return
 	}
 	// 2026-11-03：手工开户不能落到订阅账号（sub_*）或机主账号上。节点的 /users/create 对已存在的
@@ -548,8 +548,8 @@ func refuseManagedNodeAccount(w http.ResponseWriter, userID, action string) bool
 // 400 and returning false when it is unusable.
 func (s *Server) portalUserIDFromPath(w http.ResponseWriter, r *http.Request) (string, bool) {
 	userID := strings.TrimSpace(r.PathValue("uid"))
-	if userID == "" || !portalUserIDPattern.MatchString(userID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户 ID 只能是 1-64 位的字母、数字、下划线、短横线或点"})
+	if userID == "" || userID == "." || userID == ".." || !portalUserIDPattern.MatchString(userID) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "用户 ID 只能是 1-64 位的字母、数字、下划线、短横线或点，且不能为 . 或 .."})
 		return "", false
 	}
 	return userID, true

@@ -307,34 +307,42 @@ func (s *Server) setDeliveryDomain(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
 		return
 	}
-	if in.Name != nil {
-		name := strings.TrimSpace(*in.Name)
-		if name != "" && !validSubscriptionName(name) {
+	// 先完整校验名称与交付域名，全部通过后再落库与刷缓存，避免返回 400 时已部分修改名称。
+	updateName := in.Name != nil
+	var trimmedName string
+	if updateName {
+		trimmedName = strings.TrimSpace(*in.Name)
+		if trimmedName != "" && !validSubscriptionName(trimmedName) {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "显示名称 1-32 个字，不能含引号、斜杠、尖括号"})
 			return
 		}
-		// ⚠️ 2026-10-31：先落库再更新缓存。原来忽略写库错误、无条件刷新缓存：
-		// 写失败时接口回 200、当场看起来生效，重启后悄悄退回旧值 —— "谎报成功"。
-		if err := s.putSetting(r.Context(), subscriptionNameKey, name, "客户端导入后的订阅分组名称（留空则使用默认名称）"); err != nil {
+	}
+	updateDomain := !(updateName && strings.TrimSpace(in.Value) == "-")
+	var base string
+	if updateDomain {
+		var err error
+		base, err = normalizeDeliveryBase(in.Value)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if base != "" {
+			if err := checkDeliveryBase(r.Context(), base); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+	}
+	if updateName {
+		// 先落库再更新缓存：写失败时绝不刷新内存缓存，防止重启后回退。
+		if err := s.putSetting(r.Context(), subscriptionNameKey, trimmedName, "客户端导入后的订阅分组名称（留空则使用默认名称）"); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存订阅名称失败：" + err.Error()})
 			return
 		}
-		subscriptionNameCache.Store(name)
-		s.audit(r.Context(), r, "set_subscription_name", "system_setting", subscriptionNameKey, map[string]any{"value": name})
-		// 只改名称时不动域名
-		if strings.TrimSpace(in.Value) == "-" {
+		subscriptionNameCache.Store(trimmedName)
+		s.audit(r.Context(), r, "set_subscription_name", "system_setting", subscriptionNameKey, map[string]any{"value": trimmedName})
+		if !updateDomain {
 			s.getDeliveryDomain(w, r)
-			return
-		}
-	}
-	base, err := normalizeDeliveryBase(in.Value)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
-		return
-	}
-	if base != "" {
-		if err := checkDeliveryBase(r.Context(), base); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}

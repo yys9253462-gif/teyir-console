@@ -60,6 +60,12 @@ func maskKey(key string) string {
 }
 
 func (s *Server) purityKeysGet(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		claims, _ := claimsFrom(r.Context())
+		if !s.enforceReadLimit(w, claims.Subject) {
+			return
+		}
+	}
 	out := map[string]any{}
 	for name := range purityKeySettings {
 		key := s.purityKeys.Get(name)
@@ -100,7 +106,7 @@ func (s *Server) purityKeysPut(w http.ResponseWriter, r *http.Request) {
 		}
 		value := strings.TrimSpace(*ptr)
 		if value != "" && !purityKeyPattern.MatchString(value) {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": name + " 的密钥格式不对：只能是 8-128 位字母、数字、- 或 _（本次没有保存任何密钥）"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": name + " 的密钥格式不对：只能是 8-128 位字母、数字或 . : - _（本次没有保存任何密钥）"})
 			return
 		}
 		stored := ""

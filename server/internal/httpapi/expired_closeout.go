@@ -265,6 +265,7 @@ WHERE id=$1::uuid AND expires_at IS NOT NULL AND expires_at <= now()`, id)
 	if err := tx.Commit(ctx); err != nil {
 		return orphans, false, fmt.Errorf("%w：提交结案事务：%v", errCloseoutInternal, err)
 	}
+	InvalidateSubscriptionCache()
 	return orphans, true, nil
 }
 

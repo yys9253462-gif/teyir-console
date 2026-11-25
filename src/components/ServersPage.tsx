@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Cloud, Download, ListChecks, Pencil, Plug, Shuffle, Plus, Server as ServerIcon, Sparkles, Trash2 } from 'lucide-react'
-import { api, type ApiError, type Hy2Node, type Server, type ServerBilling, type ServerStatus, isAdminSession } from '../lib/api'
+import { api, loadSession, type ApiError, type Hy2Node, type Server, type ServerBilling, type ServerStatus, isAdminSession } from '../lib/api'
 import { Modal } from './Modal'
 import { BatchHostPresets } from './BatchHostPresets'
 import { InstallHy2Dialog, installBlockedReason } from './InstallHy2Dialog'
@@ -40,6 +40,12 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
   const [migrating, setMigrating] = useState(false)
   const [presetInitial, setPresetInitial] = useState<string | undefined>()
   const admin = isAdminSession()
+  const viewer = loadSession()?.role === 'viewer'
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const tools: ToolDef[] = [
     { key: 'install', title: '一键安装节点', desc: 'SSH 装好 Hysteria 2 并自动接入控制台', Icon: TOOL_ICONS.Download, tone: 'accent',
@@ -136,7 +142,7 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
         notify(err instanceof Error ? `${server.name} 连接失败：${err.message}` : '连接失败')
       }
     } finally {
-      setTesting('')
+      if (mountedRef.current) setTesting('')
     }
   }
 
@@ -159,17 +165,17 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
   const [pendingDelete, setPendingDelete] = useState<Server | null>(null)
 
   useEffect(() => {
-    if (createSignal > 0) {
+    if (createSignal > 0 && admin) {
       setDraft(emptyDraft)
       setCreating(true)
     }
-  }, [createSignal])
+  }, [createSignal, admin])
 
   function startEdit(server: Server) {
     setEditing(server)
     setDraft({
       name: server.name, host: server.host, ssh_port: String(server.ssh_port), ssh_user: server.ssh_user,
-      region: server.region, provider: server.provider, tags: server.tags.join(', '), auth: 'none', secret: '',
+      region: server.region, provider: server.provider, tags: (server.tags ?? []).join(', '), auth: 'none', secret: '',
       trafficUrl: server.traffic_api_url || '', trafficFile: server.traffic_secret_file || '',
     })
   }
@@ -180,8 +186,10 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
       notify('速率采集接口与密钥文件路径需同时填写，或同时留空')
       return false
     }
-    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:[0-9]{1,5})$/.test(draft.trafficUrl)) {
-      notify('采集接口地址只能是回环 http，例如 http://127.0.0.1:29862')
+    const urlMatch = /^http:\/\/(127\.0\.0\.1|localhost):([0-9]{1,5})$/.exec(draft.trafficUrl)
+    const trafficPort = urlMatch ? Number(urlMatch[2]) : 0
+    if (!urlMatch || !Number.isInteger(trafficPort) || trafficPort < 1 || trafficPort > 65535) {
+      notify('采集接口地址只能是回环 http 且端口在 1-65535，例如 http://127.0.0.1:29862')
       return false
     }
     if (!/^\/[A-Za-z0-9._/-]+$/.test(draft.trafficFile)) {
@@ -199,27 +207,28 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
     try {
       const r = await api.suggestServerName(host)
       return { ...d, name: d.name.trim() || r.name || '', region: d.region.trim() || r.region || '', provider: d.provider.trim() || r.provider || '' }
-    } catch { return d } finally { setNaming(false) }
+    } catch { return d } finally { if (mountedRef.current) setNaming(false) }
   }
 
   async function onHostBlur() {
     if (editing) return
     const next = await autoName(draft)
+    if (!mountedRef.current) return
     setDraft((cur) => (cur.host === next.host ? { ...cur, name: cur.name || next.name, region: cur.region || next.region, provider: cur.provider || next.provider } : cur))
   }
 
   // 未开写操作授权时：确认后直接开启（白名单 hysteria-server）并进入安装，不必再去编辑主机。
   async function unlockAndInstall(server: Server, blocked: string) {
     if (server.allow_write_ops || !server.has_credential) { notify(`无法安装：${blocked}`); return }
-    if (!(await askConfirm(`一键安装会以 sudo 执行官方安装脚本，需要先开启这台主机的写操作授权。
+    if (!(await askConfirm(`一键安装会以 sudo 执行环境变量 HY2_INSTALL_SCRIPT_URL 指定的节点安装脚本，需要先开启这台主机的写操作授权。
 
 白名单：hysteria-server（允许面板重启这个服务）
 之后可随时在「编辑主机」里关闭。`, { title: `为「${server.name}」开启写操作并安装？`, confirmText: '开启并继续安装', danger: false }))) return
     try {
-      const r = await api.setWriteOps(server.id, true, server.write_units.length ? server.write_units : ['hysteria-server'])
+      const r = await api.setWriteOps(server.id, true, (server.write_units ?? []).length ? server.write_units : ['hysteria-server'])
       const updated = { ...server, allow_write_ops: r.allow_write_ops, write_units: r.write_units }
       void onChanged()
-      setInstalling(updated)
+      if (mountedRef.current) setInstalling(updated)
     } catch (err) { notify(`开启写操作授权失败：${err instanceof Error ? err.message : err}`) }
   }
 
@@ -344,7 +353,7 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
     } catch (err) {
       notify(err instanceof Error ? `更新失败：${err.message}` : '更新失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -360,17 +369,19 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
     } catch (err) {
       notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
+
+  const endpointLocked = Boolean(editing && !admin)
 
   const fields = (
     <>
       <label className="form-field"><span>名称{editing ? ' *' : '（留空自动命名）'}</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder={naming ? "识别中…" : editing ? "edge-01" : "填完主机地址自动生成，如 美国-哥伦布"} /></label>
-      <label className="form-field"><span>主机地址 *</span><input value={draft.host} onChange={(event) => setDraft({ ...draft, host: event.target.value })} onBlur={() => void onHostBlur()} placeholder="203.0.113.10" /></label>
+      <label className="form-field"><span>主机地址 *{endpointLocked ? '（仅管理员可修改）' : ''}</span><input value={draft.host} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, host: event.target.value })} onBlur={() => void onHostBlur()} placeholder="203.0.113.10" /></label>
       <div className="form-row">
-        <label className="form-field"><span>SSH 端口</span><input value={draft.ssh_port} onChange={(event) => setDraft({ ...draft, ssh_port: event.target.value })} inputMode="numeric" /></label>
-        <label className="form-field"><span>SSH 用户</span><input value={draft.ssh_user} onChange={(event) => setDraft({ ...draft, ssh_user: event.target.value })} /></label>
+        <label className="form-field"><span>SSH 端口</span><input value={draft.ssh_port} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, ssh_port: event.target.value })} inputMode="numeric" /></label>
+        <label className="form-field"><span>SSH 用户</span><input value={draft.ssh_user} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, ssh_user: event.target.value })} /></label>
       </div>
       <p className="form-note form-note-hint">
         <Sparkles size={13} />
@@ -389,8 +400,8 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
         <label className="form-field"><span>密钥文件路径（目标机）</span><input value={draft.trafficFile} onChange={(event) => setDraft({ ...draft, trafficFile: event.target.value.trim() })} placeholder="/etc/hysteria/traffic_stats_secret" spellCheck={false} /></label>
       </div>
       <p className="form-note">填了这两项，采集器每个周期会在目标机本地读取 hysteria 自带的 trafficStats 接口（<code>?clear=true</code> 取走即清零），把这一周期的字节数按上/下行分别入库，总览的「流量趋势」就会出现真实曲线。地址仅允许回环 http，密钥不入库、只记文件路径。</p>
-      <label className="form-field"><span>{editing ? '更换 SSH 凭据（可选）' : 'SSH 认证方式'}</span>
-        <select value={draft.auth} onChange={(event) => setDraft({ ...draft, auth: event.target.value as AuthKind })}>
+      <label className="form-field"><span>{editing ? '更换 SSH 凭据（可选）' : 'SSH 认证方式'}{endpointLocked ? '（仅管理员可更换）' : ''}</span>
+        <select value={draft.auth} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, auth: event.target.value as AuthKind })}>
           <option value="ssh_key">私钥（PEM，推荐）</option>
           <option value="password">密码</option>
           <option value="none">{editing ? '不更换凭据' : '暂不配置（只登记，不采集）'}</option>
@@ -420,7 +431,7 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
 
   return (
     <>
-      <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />OPS <span>·</span> ADVANCED</div><h1>VPS 主机<span className="heading-period">.</span></h1><p className="page-subtitle">主机的 SSH 凭据与写操作授权 —— 可选的高级功能，节点功能不依赖它</p></div><div className="heading-actions"><button className="button button-quiet" onClick={() => setPresets(true)}><ListChecks size={16} />批量预设任务</button><button className="button button-primary" onClick={() => { setDraft(emptyDraft); setCreating(true) }}><Plus size={16} />添加主机</button></div></div>
+      <div className="page-heading"><div><div className="eyebrow"><span className="eyebrow-line" />OPS <span>·</span> ADVANCED</div><h1>VPS 主机<span className="heading-period">.</span></h1><p className="page-subtitle">主机的 SSH 凭据与写操作授权 —— 可选的高级功能，节点功能不依赖它</p></div><div className="heading-actions"><button className="button button-quiet" disabled={!admin} title={admin ? undefined : '仅管理员可执行批量预设任务'} onClick={() => setPresets(true)}><ListChecks size={16} />批量预设任务</button><button className="button button-primary" disabled={!admin} title={admin ? undefined : '仅管理员可添加主机'} onClick={() => { setDraft(emptyDraft); setCreating(true) }}><Plus size={16} />添加主机</button></div></div>
       {billingFor && <BillingDialog server={billingFor} billing={billing[billingFor.id]} notify={notify} onClose={() => setBillingFor(null)}
         onSaved={(b) => setBilling((m) => ({ ...m, [b.server_id]: b }))} />}
       {changingIP && <ChangeIPDialog server={changingIP} notify={notify} onClose={() => setChangingIP(null)} onDone={() => { void onChanged() }} />}
@@ -461,14 +472,14 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
                   <td><span className={`status-badge ${statusClass[server.status]}`}><i />{statusText[server.status]}</span></td>
                   <td><span className="traffic-sub">{server.ssh_user} · 端口 {server.ssh_port}</span></td>
                   <td>{server.has_credential ? <span className="status-badge online"><i />已配置</span> : <span className="status-badge offline"><i />未配置</span>}</td>
-                  <td>{server.allow_write_ops ? <span className="status-badge warning"><i />{server.write_units.join(', ') || '无白名单'}</span> : <span className="traffic-sub">只读</span>}</td>
+                  <td>{server.allow_write_ops ? <span className="status-badge warning"><i />{(server.write_units ?? []).join(', ') || '无白名单'}</span> : <span className="traffic-sub">只读</span>}</td>
                   <td>
                     <button className="billing-cell" disabled={!admin} title={admin ? '设置到期日与月费' : '仅管理员可设置到期日与月费'} onClick={(event) => { event.stopPropagation(); openBilling(server) }}>
                       {billingError ? <span className="traffic-sub">读取失败</span> : <ExpiryBadge billing={billing[server.id]} />}
                       <small>{billingError ? '刷新重试' : billing[server.id]?.monthly_cost != null ? `${CURRENCY_SYMBOL[billing[server.id].currency] ?? ''}${billing[server.id].monthly_cost}/月` : '点此填写'}</small>
                     </button>
                   </td>
-                  <td><span className="traffic-sub">{server.region || '—'}{server.tags.length ? ` · ${server.tags.join('/')}` : ''}</span></td>
+                  <td><span className="traffic-sub">{server.region || '—'}{(server.tags ?? []).length ? ` · ${(server.tags ?? []).join('/')}` : ''}</span></td>
                   <td>
                     <div className="row-actions">
                       {isAdminSession() && !hostsWithNode.has(server.id) && (() => {
@@ -482,7 +493,7 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
                         onClick={(event) => { event.stopPropagation(); void testSSH(server) }}><Plug size={14} /><span>{testing === server.id ? '测试中' : '测连接'}</span></button>}
                       {isAdminSession() && <button className="row-action" aria-label={`为 ${server.name} 同步新 IP`} title="换 IP 后同步（主机地址 + 节点域名 DNS）"
                         onClick={(event) => { event.stopPropagation(); setChangingIP(server) }}><Shuffle size={14} /><span>换 IP</span></button>}
-                      <button className="row-more" aria-label={`编辑 ${server.name}`} onClick={(event) => { event.stopPropagation(); startEdit(server) }}><Pencil size={15} /></button>
+                      <button className="row-more" aria-label={`编辑 ${server.name}`} disabled={viewer} title={viewer ? '只读账号不能编辑主机' : '编辑主机'} onClick={(event) => { event.stopPropagation(); startEdit(server) }}><Pencil size={15} /></button>
                       <button className="row-more" aria-label={`删除 ${server.name}`} disabled={busy || !isAdminSession()} title={isAdminSession() ? undefined : "仅管理员可删除服务器"} onClick={(event) => { event.stopPropagation(); setPendingDelete(server) }}><Trash2 size={15} /></button>
                     </div>
                   </td>
@@ -504,7 +515,7 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
       {pendingDelete && (
         <Modal title="删除主机" kicker="CONFIRM DELETE" onClose={() => setPendingDelete(null)}>
           <p className="form-note">即将删除主机 <strong>{pendingDelete.name}</strong>（{pendingDelete.host}）。这是软删除，历史指标与任务仍保留在数据库中；若该主机下仍有节点需先删除节点。</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={() => setPendingDelete(null)}>取消</button><button className="button button-primary" onClick={confirmDelete}>确认删除</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={busy} onClick={() => setPendingDelete(null)}>取消</button><button className="button button-danger" disabled={busy} onClick={confirmDelete}>确认删除</button></div>
         </Modal>
       )}
 

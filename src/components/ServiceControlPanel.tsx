@@ -83,20 +83,28 @@ export function ServiceControlPanel({ server, notify }: {
   // 2026-11-06：只采用最后一次请求的结果。切换主机时上一台主机的服务列表晚回来会显示在当前主机下，
   // 「重启 / 停止」按钮随即对当前主机下发另一台主机的服务名。
   const loadSeq = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
   const load = useCallback(async () => {
     const seq = ++loadSeq.current
     setLoading(true)
     try {
       const response = await api.serverServices(server.id)
-      if (seq !== loadSeq.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setUnits(response.units ?? [])
       setNote(response.note ?? response.error ?? null)
     } catch (err) {
-      if (seq !== loadSeq.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setUnits([])
       setNote(err instanceof Error ? `读取服务状态失败：${err.message}` : '读取服务状态失败')
     } finally {
-      if (seq === loadSeq.current) setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
   }, [server.id])
 
@@ -110,6 +118,7 @@ export function ServiceControlPanel({ server, notify }: {
     } else {
       setNote('该主机未配置 SSH 凭据，无法读取服务状态')
     }
+    return () => { loadSeq.current++ }
   }, [server.id, server.has_credential, load])
 
   async function dispatch(unit: string, action: keyof typeof ACTION_META) {
@@ -134,7 +143,7 @@ export function ServiceControlPanel({ server, notify }: {
     } catch (err) {
       notify(err instanceof Error ? `下发失败：${err.message}` : '下发失败')
     } finally {
-      setBusyUnit(null)
+      if (mountedRef.current) setBusyUnit(null)
     }
   }
 
@@ -167,7 +176,7 @@ export function ServiceControlPanel({ server, notify }: {
 
       {note && <p className="form-note">{note}</p>}
 
-      {units.length === 0 && !note && (
+      {units.length === 0 && !note && !loading && (
         <div className="empty-state compact"><Power size={18} /><strong>没有可管理的服务</strong><span>在写操作设置中添加 unit 后即可在此控制。</span></div>
       )}
 

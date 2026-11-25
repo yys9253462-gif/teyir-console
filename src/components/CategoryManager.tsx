@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Plus, Trash2, Tag, AlertTriangle, Power } from 'lucide-react'
 import { api, type NodeCategory } from '../lib/api'
 import { Modal } from './Modal'
@@ -37,19 +37,32 @@ export function CategoryManager({ notify, onClose, onChanged }: {
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
 
-  async function load() {
+  const loadSeq = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     setErr('')
     try {
       const res = await api.listCategories()
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setList(res.categories ?? [])
     } catch (e) {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setErr(e instanceof Error ? e.message : '读取分类失败')
     } finally {
-      setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
-  }
-  useEffect(() => { void load() }, [])
+  }, [])
+  useEffect(() => { void load() }, [load])
 
   async function create() {
     const s = slug.trim().toLowerCase()
@@ -63,13 +76,13 @@ export function CategoryManager({ notify, onClose, onChanged }: {
     try {
       await api.createCategory({ slug: s, name: n, description: desc.trim() })
       notify(`已创建分类：${n}`)
-      setSlug(''); setName(''); setDesc('')
+      if (mountedRef.current) { setSlug(''); setName(''); setDesc('') }
       await load()
       onChanged()
     } catch (e) {
       notify(e instanceof Error ? `创建失败：${e.message}` : '创建失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -85,7 +98,7 @@ export function CategoryManager({ notify, onClose, onChanged }: {
     } catch (e) {
       notify(e instanceof Error ? `操作失败：${e.message}` : '操作失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -104,7 +117,7 @@ export function CategoryManager({ notify, onClose, onChanged }: {
     } catch (e) {
       notify(e instanceof Error ? `删除失败：${e.message}` : '删除失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 

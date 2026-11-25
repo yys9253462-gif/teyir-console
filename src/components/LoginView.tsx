@@ -113,7 +113,7 @@ export function LoginView({ onLogin }: { onLogin: () => void }) {
         {needsCaptcha && <div ref={widgetRef} className="login-captcha" />}
         {configLoading && <p className="form-note" role="status">正在加载人机验证配置…</p>}
         {verificationError && <div className="login-error" role="alert">
-          {verificationError}。尚未确认验证配置，请重试。
+          {verificationError}{siteKey === null ? '（尚未确认验证配置，请重试）' : ''}
           <button className="button button-quiet button-compact" type="button" disabled={configLoading || pending} onClick={() => { setError(null); setConfigAttempt((attempt) => attempt + 1) }}>重新加载人机验证</button>
         </div>}
         {error && <div className="login-error" role="alert">{error}</div>}

@@ -188,7 +188,7 @@ func (s *Server) portalDeleteProxyService(w http.ResponseWriter, r *http.Request
 		return
 	}
 	proxyID := strings.TrimSpace(r.PathValue("pid"))
-	if !proxyIDPattern.MatchString(proxyID) {
+	if !proxyIDPattern.MatchString(proxyID) && !proxyPrefixedIDPattern.MatchString(proxyID) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "代理服务 ID 不合法"})
 		return
 	}

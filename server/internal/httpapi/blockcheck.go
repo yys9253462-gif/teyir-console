@@ -59,6 +59,10 @@ func (s *Server) cnProbeServerID(ctx context.Context) (string, error) {
 
 // GET /api/block-checks
 func (s *Server) listBlockChecks(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceReadLimit(w, claims.Subject) {
+		return
+	}
 	probe := map[string]any(nil)
 	probeMissing := false
 	id, err := s.cnProbeServerID(r.Context())
@@ -120,11 +124,15 @@ func (s *Server) setCNProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.ServerID = strings.TrimSpace(in.ServerID)
-	// 2026-11-04：ID 格式不对是 400；查询失败是 500。原来三种情况一律 404「主机不存在」，
-	// 数据库故障被说成主机没了，真实错误也没进日志。
-	if in.ServerID != "" && !uuidPattern.MatchString(in.ServerID) {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机 ID 格式不正确"})
-		return
+	// 2026-11-04：ID 格式不对是 400；查询失败是 500。同时规范为小写标准 UUID，
+	// 确保 blockedNodeConditionsSQL 中的 ps.id::text = ss.value 精确匹配。
+	if in.ServerID != "" {
+		norm, ok := canonicalUUID(in.ServerID)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机 ID 格式不正确"})
+			return
+		}
+		in.ServerID = norm
 	}
 	if in.ServerID != "" {
 		var hasCred bool
@@ -319,6 +327,9 @@ ON CONFLICT (node_id) DO UPDATE SET probe_server_id=EXCLUDED.probe_server_id, ta
 		}
 	}
 	if len(targets) == 0 {
+		if persistFailed > 0 {
+			return 0, blockCheckPersistError{persistFailed}
+		}
 		return 0, nil
 	}
 
@@ -329,14 +340,14 @@ ON CONFLICT (node_id) DO UPDATE SET probe_server_id=EXCLUDED.probe_server_id, ta
 	defer client.Close()
 
 	// 所有目标并发探测，单个 TCP 4 秒、ping 2 包，整体约 10 秒。
-	// IP 与端口都来自面板自己的库并已校验为合法 IP / 整数，可以安全拼进命令。
+	// IP 与端口都来自面板自己的库并已校验为合法 IP / 整数，仍使用 shellQuote 安全转义脚本整体。
 	var script strings.Builder
 	script.WriteString("probe(){ t=no; timeout 4 bash -c \"</dev/tcp/$2/$3\" 2>/dev/null && t=yes; p=no; ping -c 2 -W 2 -q \"$2\" >/dev/null 2>&1 && p=yes; echo \"$1 $t $p\"; }\n")
 	for _, t := range targets {
 		fmt.Fprintf(&script, "probe %s %s %d &\n", t.nodeID, t.ip, t.port)
 	}
 	script.WriteString("wait\n")
-	out, stderr, code, err := sshclient.Run(ctx, client, "bash -c '"+script.String()+"'")
+	out, stderr, code, err := sshclient.Run(ctx, client, "bash -c "+shellQuote(script.String()))
 	if err != nil || code != 0 {
 		return 0, blockCheckProbeError{"探测点执行失败：" + firstNonEmpty(strings.TrimSpace(stderr), fmt.Sprint(err))}
 	}

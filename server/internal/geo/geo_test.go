@@ -596,3 +596,54 @@ func TestIPAPIBoundsResponseBody(t *testing.T) {
 		t.Fatal("an oversized response must be rejected, not parsed")
 	}
 }
+
+// 安全客户端与 IsPublicIP 必须拦截 CGNAT（含云元数据）、NAT64 及其他特殊保留段，杜绝 SSRF 旁路。
+func TestSafeClientAndIsPublicIPRejectSpecialUseRanges(t *testing.T) {
+	badIPs := []string{"100.100.100.200", "64:ff9b::7f00:1", "0.1.2.3", "240.0.0.1", "::127.0.0.1", "100::1", "fec0::1"}
+	for _, ip := range badIPs {
+		if IsPublicIP(ip) {
+			t.Errorf("IsPublicIP(%q) = true，应拒绝特殊保留段", ip)
+		}
+	}
+	for _, target := range []string{
+		"http://100.100.100.200/latest/meta-data/",
+		"http://[64:ff9b::7f00:1]:80/",
+		"http://0.1.2.3:80/",
+		"http://240.0.0.1:80/",
+	} {
+		req, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("构造请求 %s 失败: %v", target, err)
+		}
+		resp, err := safeClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			t.Errorf("safeClient 应当拒绝特殊保留段目标 %s", target)
+		}
+	}
+}
+
+// Resolver 缓存读写须统一使用注入时钟，推进时钟超过 TTL 后必须失效重新查询。
+func TestResolverCacheRespectsInjectedClock(t *testing.T) {
+	now := time.Date(2026, 11, 25, 10, 0, 0, 0, time.UTC)
+	api := &stubAPI{info: &Info{Region: "Tokyo", Provider: "AWS"}}
+	resolver := NewResolver(Options{API: api, Cache: NewCache(5*time.Minute, 10)})
+	resolver.now = func() time.Time { return now }
+
+	if _, err := resolver.Lookup(context.Background(), "1.2.3.4"); err != nil {
+		t.Fatalf("首次查询失败: %v", err)
+	}
+	if _, err := resolver.Lookup(context.Background(), "1.2.3.4"); err != nil {
+		t.Fatalf("命中缓存失败: %v", err)
+	}
+	if api.calls != 1 {
+		t.Fatalf("未过期前应命中缓存，实际调用 API %d 次", api.calls)
+	}
+	now = now.Add(6 * time.Minute)
+	if _, err := resolver.Lookup(context.Background(), "1.2.3.4"); err != nil {
+		t.Fatalf("过期后重查失败: %v", err)
+	}
+	if api.calls != 2 {
+		t.Fatalf("推进注入时钟超过 TTL 后应重新查 API，实际调用 %d 次", api.calls)
+	}
+}

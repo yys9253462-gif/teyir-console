@@ -115,10 +115,11 @@ func (g *loginGuard) fail(ip string, now time.Time) bool {
 	if len(recent) >= loginFailMax {
 		g.banned[ip] = now.Add(loginBanFor)
 		delete(g.fails, ip)
+		g.evictBannedLocked(now, ip)
 		return true
 	}
-	// 顺手清理很久没动的条目，并在分布式洪水时设硬上限防止 OOM。
-	if len(g.fails) > 5000 {
+	// 在分布式洪水时强制限制 map 体积，防止内存无限增长（OOM）。
+	if len(g.fails) > maxLoginGuardEntries {
 		for k, v := range g.fails {
 			if len(v) == 0 || now.Sub(v[len(v)-1]) > loginFailWindow {
 				delete(g.fails, k)
@@ -144,14 +145,36 @@ func (g *loginGuard) fail(ip string, now time.Time) bool {
 			delete(g.fails, oldestKey)
 		}
 	}
-	if len(g.banned) > maxLoginGuardEntries {
-		for k, until := range g.banned {
-			if now.After(until) {
-				delete(g.banned, k)
-			}
+	g.evictBannedLocked(now, ip)
+	return false
+}
+
+// evictBannedLocked 在封禁表超出硬上限时先清过期项，仍超限则淘汰最早解封的旧条目，防止分布式爆破耗尽内存。
+func (g *loginGuard) evictBannedLocked(now time.Time, keepIP string) {
+	if len(g.banned) <= maxLoginGuardEntries {
+		return
+	}
+	for k, until := range g.banned {
+		if now.After(until) {
+			delete(g.banned, k)
 		}
 	}
-	return false
+	for len(g.banned) > maxLoginGuardEntries {
+		var earliestKey string
+		var earliestUntil time.Time
+		for k, until := range g.banned {
+			if k == keepIP {
+				continue
+			}
+			if earliestKey == "" || until.Before(earliestUntil) {
+				earliestKey, earliestUntil = k, until
+			}
+		}
+		if earliestKey == "" {
+			break
+		}
+		delete(g.banned, earliestKey)
+	}
 }
 
 func (g *loginGuard) success(ip string) {
@@ -281,6 +304,9 @@ RETURNING (xmax = 0)`, userID, ip, userAgent).Scan(&inserted)
 // GET /api/auth/logins —— 当前账号最近的登录来源。
 func (s *Server) myLogins(w http.ResponseWriter, r *http.Request) {
 	claims, _ := claimsFrom(r.Context())
+	if !s.enforceReadLimit(w, claims.Subject) {
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `
 SELECT host(ip), user_agent, first_seen_at, last_seen_at, login_count FROM login_history
 WHERE user_id = $1::uuid ORDER BY last_seen_at DESC LIMIT 20`, claims.Subject)

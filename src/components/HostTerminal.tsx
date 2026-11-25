@@ -35,6 +35,9 @@ export function HostTerminal({ serverId }: { serverId: string }) {
   }
 
   useEffect(() => {
+    setStatus('未连接')
+    setBusy(false)
+    setError('')
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 3000, theme: { background: '#101318' } })
     const addon = new FitAddon()
     term.loadAddon(addon)
@@ -42,8 +45,12 @@ export function HostTerminal({ serverId }: { serverId: string }) {
     terminal.current = term
     fit.current = addon
     const resize = () => {
-      if (!element.current?.clientWidth) return
-      addon.fit()
+      if (!element.current?.clientWidth || !element.current?.clientHeight) return
+      try {
+        addon.fit()
+      } catch {
+        return
+      }
       const socket = connection.current?.socket
       if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', cols: Math.min(500, Math.max(1, term.cols)), rows: Math.min(200, Math.max(1, term.rows)) }))
     }

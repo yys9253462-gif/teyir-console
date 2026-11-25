@@ -24,13 +24,38 @@
  */
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 
-const CHROME_CANDIDATES = [
-  'C:/Users/small/AppData/Local/ms-playwright/chromium_headless_shell-1234/chrome-headless-shell-win64/chrome-headless-shell.exe',
-  'C:/Users/small/AppData/Local/ms-playwright/chromium_headless_shell-1219/chrome-headless-shell-win64/chrome-headless-shell.exe',
-  'C:/Users/small/AppData/Local/ms-playwright/chromium_headless_shell-1217/chrome-headless-shell-win64/chrome-headless-shell.exe',
-]
+// 优先读取 CHROME_PATH 环境变量，再按当前平台动态探测 Playwright 或系统浏览器路径（严禁硬编码个人用户名）。
+function collectChromeCandidates() {
+  const list = []
+  if (process.env.CHROME_PATH) list.push(process.env.CHROME_PATH)
+  const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local')
+  const pwRoot = path.join(localAppData, 'ms-playwright')
+  try {
+    if (fs.existsSync(pwRoot)) {
+      const dirs = fs.readdirSync(pwRoot)
+        .filter((d) => d.startsWith('chromium_headless_shell-') || d.startsWith('chromium-'))
+        .sort()
+        .reverse()
+      for (const dir of dirs) {
+        list.push(path.join(pwRoot, dir, 'chrome-headless-shell-win64', 'chrome-headless-shell.exe'))
+        list.push(path.join(pwRoot, dir, 'chrome-win', 'chrome.exe'))
+      }
+    }
+  } catch { /* 目录不可读时忽略，继续探测系统路径 */ }
+  list.push(
+    'C:/Program Files/Google/Chrome/Application/chrome.exe',
+    'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+    '/usr/bin/chromium',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/google-chrome',
+  )
+  return list
+}
+
+const CHROME_CANDIDATES = collectChromeCandidates()
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf('--' + name)

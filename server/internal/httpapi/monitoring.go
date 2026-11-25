@@ -557,6 +557,14 @@ func (s *Server) speedtestRun(w http.ResponseWriter, r *http.Request) {
 	// 写限流（10 秒 20 次）挡不住。进行中再触发时直接告诉操作者，不再叠加；不同节点互不影响。
 	// 占位在查库之前：没有后台任务要启动的返回路径都会释放它，只有后台任务结束时才由它释放。
 	scope := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	if scope != "" {
+		norm, ok := canonicalUUID(scope)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "节点 ID 格式不正确"})
+			return
+		}
+		scope = norm
+	}
 	if _, busy := manualSpeedtestRunning.LoadOrStore(scope, struct{}{}); busy {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "上一轮测速还在进行，完成后再触发"})
 		return
@@ -589,7 +597,7 @@ FROM servers s
 JOIN hysteria_nodes n ON n.server_id = s.id AND n.deleted_at IS NULL
 WHERE s.deleted_at IS NULL
   AND ($1 = '' OR n.id::text = $1)
-ORDER BY s.name, n.name`, strings.TrimSpace(r.URL.Query().Get("node_id")))
+ORDER BY s.name, n.name`, scope)
 	if err != nil {
 		s.databaseError(w, r, err)
 		return

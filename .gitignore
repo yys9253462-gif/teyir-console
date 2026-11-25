@@ -16,6 +16,7 @@ bin/
 /server/cmd/migrate/migrate
 /migrate
 tmp/
+coverage.out
 
 # 工具本地的会话/记忆目录，不属于项目产物
 .workbuddy/
@@ -68,7 +69,6 @@ pnpm-workspace.yaml
 *.orig
 *.old
 *~
-*.before-restore-*
 Caddyfile.bak-*
 docker-compose.yml.bak-*
 
@@ -80,4 +80,3 @@ docker-compose.yml.bak-*
 .release-ops-*/
 docker-compose.worktree.yml
 docker-compose.yml.pre-*
-docker-compose.yml.bak-*

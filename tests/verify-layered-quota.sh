@@ -11,9 +11,13 @@
 
 set -u
 
-API=${API:-http://127.0.0.1:8081}
-NODE=${NODE:-27de1727-1f07-4881-b183-45a5ad03e976}
+API=${API:-http://127.0.0.1:8080}
+NODE=${NODE:-}
 WINDOW=10
+if [ -z "$NODE" ]; then
+  echo "请通过环境变量 NODE 指定待测节点 UUID，例如：NODE=00000000-0000-0000-0000-000000000001 bash tests/verify-layered-quota.sh" >&2
+  exit 1
+fi
 
 # ★ 选请求的讲究（第一版就在这里栽了）：
 #

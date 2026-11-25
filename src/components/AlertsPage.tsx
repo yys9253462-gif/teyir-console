@@ -22,7 +22,8 @@ const eventText: Record<AlertEvent['event_type'], { label: string; hint: string 
 }
 
 function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
 }
 
 export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
@@ -51,6 +52,16 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
   const canEditWebhook = isAdminSession()
   const viewer = loadSession()?.role === 'viewer'
   const resolvedLoadedRef = useRef(false)
+  const mountedRef = useRef(true)
+  const timelineSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      timelineSeq.current += 1
+    }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -68,14 +79,17 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
     }
     setExpanded(alert.id)
     if (timelines[alert.id]) return
+    const seq = ++timelineSeq.current
     setTimelineLoading(alert.id)
     try {
       const events = await api.alertEvents(alert.id)
-      setTimelines((current) => ({ ...current, [alert.id]: events }))
+      if (!mountedRef.current) return
+      setTimelines((current) => ({ ...current, [alert.id]: events ?? [] }))
     } catch (err) {
+      if (!mountedRef.current || seq !== timelineSeq.current) return
       notify(err instanceof Error ? `时间线读取失败：${err.message}` : '时间线读取失败')
     } finally {
-      setTimelineLoading(null)
+      if (mountedRef.current && seq === timelineSeq.current) setTimelineLoading(null)
     }
   }
 
@@ -90,7 +104,7 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
       .then((list) => {
         if (!alive) return
         resolvedLoadedRef.current = true
-        setResolved(list.filter((alert) => alert.status === 'resolved'))
+        setResolved((list ?? []).filter((alert) => alert.status === 'resolved'))
       })
       .catch((err) => {
         if (alive) notify(err instanceof Error ? `历史告警读取失败：${err.message}` : '历史告警读取失败')
@@ -102,40 +116,45 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
   }, [showResolved, alerts, notify])
 
   async function acknowledge(alert: Alert) {
+    if (busy) return
     setBusy(alert.id)
     try {
       await api.acknowledgeAlert(alert.id)
+      if (!mountedRef.current) return
       // 2026-11-06：清掉这条的时间线缓存。原来缓存一直不清，确认之后再展开看不到刚写入的「已确认」事件。
       setTimelines(({ [alert.id]: _stale, ...rest }) => rest)
       notify(`已确认告警：${alert.server_name || alert.node_name}`)
       await onChanged()
     } catch (err) {
+      if (!mountedRef.current) return
       notify(err instanceof Error ? `确认失败：${err.message}` : '确认失败')
     } finally {
-      setBusy(null)
+      if (mountedRef.current) setBusy(null)
     }
   }
 
   async function confirmMachineOffline(alert: Alert) {
-    if (!alert.node_id) return
+    if (!alert.node_id || busy) return
     const ok = await askConfirm(
       `确认「${alert.node_name}」所在的机器已经永久下线（关机、退租或被封且不会恢复）？\n\n` +
       '确认后会删除这个节点：能注销的账号照常注销，注销不了的登记后直接结案，不再进入待补删、不再告警。\n' +
       '这一步不可撤销。如果机器只是暂时连不上，请不要点，等它恢复后系统会自动重试回收。',
       { confirmText: '确认已下线并删除节点', danger: true },
     )
-    if (!ok) return
+    if (!ok || !mountedRef.current) return
     setBusy(alert.id)
     try {
       const result = await api.deleteNode(alert.node_id, true)
+      if (!mountedRef.current) return
       notify(result.status === 'deleted_decommissioned'
         ? `已删除节点 ${alert.node_name}，收不回的账号已登记结案`
         : `已删除节点 ${alert.node_name}`)
       await onChanged()
     } catch (err) {
+      if (!mountedRef.current) return
       notify(err instanceof Error ? `操作失败：${err.message}` : '操作失败')
     } finally {
-      setBusy(null)
+      if (mountedRef.current) setBusy(null)
     }
   }
 
@@ -202,19 +221,23 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
               disabled={busy === 'webhook' || !canEditWebhook}
               title={canEditWebhook ? undefined : '仅管理员可修改'}
               onClick={async () => {
+                if (busy === 'webhook') return
                 // 留空保存 = 关闭外发，与「关闭外发」按钮同样先确认。
                 if (!webhookDraft.trim() && !await askConfirm('关闭告警外发？之后告警只在面板内显示，不再推送到外部地址。', { confirmText: '关闭外发', danger: true })) return
+                if (!mountedRef.current) return
                 setBusy('webhook')
                 try {
                   const res = await api.setAlertWebhook(webhookDraft.trim())
+                  if (!mountedRef.current) return
                   setWebhook(res)
                   setWebhookLoadError('')
                   setWebhookDraft('')
                   notify(res.configured ? `告警外发已指向 ${res.host}` : '已关闭告警外发')
                 } catch (error) {
+                  if (!mountedRef.current) return
                   notify(error instanceof Error ? error.message : '保存失败')
                 } finally {
-                  setBusy(null)
+                  if (mountedRef.current) setBusy(null)
                 }
               }}
             >
@@ -226,18 +249,22 @@ export function AlertsPage({ alerts, onChanged, notify, stale = false }: {
                 disabled={busy === 'webhook' || !canEditWebhook}
                 title={canEditWebhook ? undefined : '仅管理员可修改'}
                 onClick={async () => {
+                  if (busy === 'webhook') return
                   // 2026-11-04：关闭前确认。原来一点就清空外发地址，误点后所有告警都不再外发。
                   if (!await askConfirm('关闭告警外发？之后告警只在面板内显示，不再推送到外部地址。', { confirmText: '关闭外发', danger: true })) return
+                  if (!mountedRef.current) return
                   setBusy('webhook')
                   try {
                     const res = await api.setAlertWebhook('')
+                    if (!mountedRef.current) return
                     setWebhook(res)
                     setWebhookLoadError('')
                     notify('已关闭告警外发')
                   } catch (error) {
+                    if (!mountedRef.current) return
                     notify(error instanceof Error ? error.message : '关闭失败')
                   } finally {
-                    setBusy(null)
+                    if (mountedRef.current) setBusy(null)
                   }
                 }}
               >

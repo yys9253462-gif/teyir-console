@@ -218,7 +218,10 @@ func (s *Server) telegramWizardRead(ctx context.Context, path string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	req, _ := http.NewRequestWithContext(ctx, "GET", path, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("构造内部读取请求失败：%w", err)
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.RemoteAddr = "127.0.0.1:0"
 	rec := httptest.NewRecorder()
@@ -229,35 +232,47 @@ func (s *Server) telegramWizardRead(ctx context.Context, path string) ([]byte, e
 	return rec.Body.Bytes(), nil
 }
 func (s *Server) telegramWizardPrompt(ctx context.Context, chat string, w *telegramWizard) {
-	if w.Index >= len(w.Fields) {
-		s.telegramWizardFinish(ctx, chat, w)
-		return
-	}
-	f := w.Fields[w.Index]
-	options := s.telegramWizardOptions(ctx, w, f)
 	st := &s.telegramControl
 	st.Lock()
 	if st.Wizards[chat] != w {
 		st.Unlock()
 		return
 	}
+	idx := w.Index
+	total := len(w.Fields)
+	if idx >= total {
+		st.Unlock()
+		s.telegramWizardFinish(ctx, chat, w)
+		return
+	}
+	f := w.Fields[idx]
+	pattern := w.Pattern
+	st.Unlock()
+
+	options := s.telegramWizardOptions(ctx, w, f)
+	nonceBytes := make([]byte, 8)
+	_, _ = rand.Read(nonceBytes)
+	nonce := hex.EncodeToString(nonceBytes)
+	st.Lock()
+	if st.Wizards[chat] != w || w.Index != idx {
+		st.Unlock()
+		return
+	}
 	w.Choices = options
-	nonce := make([]byte, 8)
-	rand.Read(nonce)
-	w.Nonce = hex.EncodeToString(nonce)
+	w.Nonce = nonce
 	st.Unlock()
 	rows := [][]map[string]string{}
 	for i, o := range options {
 		if i >= 40 {
 			break
 		}
-		rows = append(rows, []map[string]string{tgButton(o.Label, fmt.Sprintf("tg:w:%s:%d", w.Nonce, i))})
+		rows = append(rows, []map[string]string{tgButton(o.Label, fmt.Sprintf("tg:w:%s:%d", nonce, i))})
 	}
 	if f.Location != "path" {
-		rows = append(rows, []map[string]string{tgButton("跳过（保留默认）", "tg:w:"+w.Nonce+":skip")})
+		rows = append(rows, []map[string]string{tgButton("跳过（保留默认）", "tg:w:"+nonce+":skip")})
 	}
-	rows = append(rows, []map[string]string{tgButton("取消", "tg:w:"+w.Nonce+":cancel")})
-	text := fmt.Sprintf("%s\n第%d/%d项：%s\n", telegramRouteTitle(w.Pattern), w.Index+1, len(w.Fields), telegramWizardLabel(f))
+	rows = append(rows, []map[string]string{tgButton("取消", "tg:w:"+nonce+":cancel")})
+	text := fmt.Sprintf("%s\n第%d/%d项：%s\n", telegramRouteTitle(pattern), idx+1, total, telegramWizardLabel(f))
 	if len(options) > 0 {
 		text += "请点选；也可直接发送对应值。"
 	} else {
@@ -317,36 +332,46 @@ func (s *Server) telegramWizardInput(ctx context.Context, chat, text string) boo
 	st := &s.telegramControl
 	st.Lock()
 	w := st.Wizards[chat]
-	st.Unlock()
 	if w == nil {
+		st.Unlock()
 		return false
 	}
 	if time.Now().After(w.Until) {
-		st.Lock()
 		delete(st.Wizards, chat)
 		st.Unlock()
 		s.sendTelegram(ctx, chat, "表单已过期，请从全部功能重新选择。")
 		return true
 	}
-	if w.Index >= len(w.Fields) {
+	idx := w.Index
+	if idx >= len(w.Fields) {
+		st.Unlock()
 		return true
 	}
-	f := w.Fields[w.Index]
+	f := w.Fields[idx]
+	st.Unlock()
 	if text == "/skip" && f.Location == "path" {
 		s.sendTelegram(ctx, chat, "对象必须选择，不能跳过。")
 		return true
 	}
+	var parsedVal any
+	hasVal := false
 	if text != "/skip" {
 		v, err := telegramWizardValue(f, text)
 		if err != nil {
 			s.sendTelegram(ctx, chat, err.Error())
 			return true
 		}
-		st.Lock()
-		w.Values[f.Location+"."+f.Name] = v
-		st.Unlock()
+		parsedVal = v
+		hasVal = true
 	}
 	st.Lock()
+	if st.Wizards[chat] != w || w.Index != idx {
+		st.Unlock()
+		return true
+	}
+	if hasVal {
+		w.Values[f.Location+"."+f.Name] = parsedVal
+	}
 	w.Index++
 	w.Until = time.Now().Add(10 * time.Minute)
 	st.Unlock()
@@ -454,7 +479,9 @@ func telegramWizardPreview(raw []byte) string {
 	for _, k := range keys {
 		n := strings.ToLower(k)
 		label := telegramWizardLabel(telegramFormField{Name: k})
-		if strings.Contains(n, "password") || strings.Contains(n, "secret") || strings.Contains(n, "token") {
+		if strings.Contains(n, "password") || strings.Contains(n, "passwd") || strings.Contains(n, "secret") ||
+			strings.Contains(n, "token") || strings.Contains(n, "api_key") || strings.Contains(n, "private_key") ||
+			strings.Contains(n, "cookie") || strings.Contains(n, "authorization") || strings.Contains(n, "credential") {
 			lines = append(lines, label+"：已填写（不回显）")
 			continue
 		}

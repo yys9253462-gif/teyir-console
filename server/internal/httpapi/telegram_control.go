@@ -192,29 +192,46 @@ var telegramGroups = []struct{ ID, Label string }{
 	{"tasks", "🛠 任务与巡检"}, {"alerts", "🚨 告警管理"}, {"reports", "📊 检测与报表"}, {"settings", "⚙️ 系统设置"},
 }
 
-// telegramPanelURL 返回可配置的面板外部地址；未配置时返回空串，避免生成无效外链。
+// isTelegramReadOnlyAPI 严格解析 /api 指令的第二个字段判断是否为只读 GET，防止在 JSON 正文中伪造 " GET " 绕过 5 分钟过期拦截。
+func isTelegramReadOnlyAPI(text string) bool {
+	fields := strings.Fields(text)
+	return len(fields) >= 2 && strings.EqualFold(fields[1], http.MethodGet)
+}
+
+// telegramPanelURL 返回可配置的面板外部地址；未配置或为不可外访地址（如回环/私网/含凭据）时返回空串，
+// 防止 Telegram 因 BUTTON_URL_INVALID 拒收整条告警或按钮消息。
 func telegramPanelURL() string {
 	for _, key := range []string{"PANEL_PUBLIC_URL", "SUBSCRIPTION_PUBLIC_BASE_URL"} {
 		raw := strings.TrimSpace(os.Getenv(key))
-		if raw == "" {
+		if raw == "" || strings.ContainsAny(raw, " \t\r\n") || controlChars.MatchString(raw) {
 			continue
 		}
 		u, err := url.Parse(raw)
-		if err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
-			return strings.TrimRight(raw, "/")
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil {
+			continue
 		}
+		host := strings.ToLower(u.Hostname())
+		if ip := net.ParseIP(host); ip != nil {
+			if !ippurity.IsPublicIP(host) {
+				continue
+			}
+		} else if host == "localhost" || !strings.Contains(host, ".") {
+			continue
+		}
+		return strings.TrimRight(raw, "/")
 	}
 	return ""
 }
 
-// banWebhookBaseURL 读取宿主机封禁联动接口地址；未配置时返回空串。
+// banWebhookBaseURL 读取宿主机封禁联动接口地址；未配置或格式非法时返回空串。
 func banWebhookBaseURL() string {
 	raw := strings.TrimSpace(os.Getenv("BAN_WEBHOOK_URL"))
-	if raw == "" {
+	if raw == "" || strings.ContainsAny(raw, " \t\r\n") || controlChars.MatchString(raw) {
 		return ""
 	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return ""
 	}
 	return strings.TrimRight(raw, "/")
@@ -416,7 +433,11 @@ func (s *Server) telegramRun(ctx context.Context, chat, sender string, a telegra
 	// 还提前释放了节点写锁。
 	runCtx, cancel := context.WithTimeout(ctx, telegramRunTimeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(runCtx, a.Method, a.Path, strings.NewReader(string(a.Body)))
+	req, err := http.NewRequestWithContext(runCtx, a.Method, a.Path, strings.NewReader(string(a.Body)))
+	if err != nil {
+		_ = s.sendTelegram(ctx, chat, "请求路径或方法无效，未执行。")
+		return
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("User-Agent", "Teyir-Telegram-Control")
@@ -426,10 +447,12 @@ func (s *Server) telegramRun(ctx context.Context, chat, sender string, a telegra
 	}
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, req)
-	// handlers 自身写原有业务审计；这里再记 Telegram 入口（不写请求体/凭据）。
+	// handlers 自身写原有业务审计；这里用脱离 runCtx 的独立短超时再记 Telegram 入口（不写请求体/凭据），避免长操作逼近超时丢审计。
 	if claims, err := s.authenticate(req); err == nil {
-		auditReq := req.WithContext(context.WithValue(req.Context(), claimsKey, claims))
-		s.audit(auditReq.Context(), auditReq, "telegram_control", "telegram", "", map[string]any{"telegram_chat": chat, "method": a.Method, "path": strings.SplitN(a.Path, "?", 2)[0], "http_status": rec.Code, "telegram_user": sender})
+		auditCtx, stopAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		auditReq := req.WithContext(context.WithValue(auditCtx, claimsKey, claims))
+		s.audit(auditCtx, auditReq, "telegram_control", "telegram", "", map[string]any{"telegram_chat": chat, "method": a.Method, "path": strings.SplitN(a.Path, "?", 2)[0], "http_status": rec.Code, "telegram_user": sender})
+		stopAudit()
 	}
 	result := telegramFriendlyResult(a, rec.Code, rec.Body.Bytes())
 	// 2026-11-04：有些接口用 200 + 结构化字段报「部分节点没生效」（停用订阅的 node_state_ok=false、
@@ -1005,8 +1028,12 @@ func (s *Server) telegramBanQuery(ctx context.Context, chat, path, ip string) {
 		return
 	}
 	// 2026-11-03：长列表（6 个 jail × 25 个 IPv6）超过 4096 字符会被整条拒收。
-	// 先把超出部分作为普通消息发出，按钮挂在最后一段上。
-	chunks := splitTelegramMessage(res.Text, telegramChunkLimit)
+	// 空文本兜底避免触发 Telegram 400 message text is empty；先发超出段，按钮挂在最后一段上。
+	textOut := strings.TrimSpace(res.Text)
+	if textOut == "" {
+		textOut = "（宿主机封禁服务未返回详情）"
+	}
+	chunks := splitTelegramMessage(textOut, telegramChunkLimit)
 	for _, chunk := range chunks[:len(chunks)-1] {
 		if err := s.sendTelegram(ctx, chat, chunk); err != nil {
 			s.logger.Warn("telegram ban query: send failed", "error", err)

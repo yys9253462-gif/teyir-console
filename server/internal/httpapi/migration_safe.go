@@ -57,7 +57,8 @@ type migrationTLS struct {
 	Files    map[string]string `json:"files"`
 }
 
-const readMigrationTLS = `import runpy,pathlib,re,shlex,json,base64
+const readMigrationTLS = `import runpy,pathlib,posixpath,re,shlex,json,base64
+allow=('/etc/hysteria/','/var/lib/hysteria/','/root/.cache/hysteria/','/root/.acme.sh/','/etc/letsencrypt/','/etc/ssl/')
 root=pathlib.Path('/etc/hysteria');m=runpy.run_path(str(root/'portal.py'))
 cert,cn,sans,selfsigned=m['_resolve_live_cert'](root)
 cert=pathlib.Path(cert);cfg=(root/'config.yaml').read_text()
@@ -69,22 +70,57 @@ if cert.stat().st_size>262144 or key.stat().st_size>262144:raise RuntimeError('c
 files={}
 for p in [cert,key,cert.with_suffix('.json')]:
  if p.is_file():
-  if not str(p).startswith(('/etc/hysteria/','/var/lib/hysteria/','/root/.cache/hysteria/','/root/.acme.sh/','/etc/letsencrypt/','/etc/ssl/')):raise RuntimeError('certificate path outside migration allowlist')
+  norm=posixpath.normpath(str(p.resolve()))
+  if not norm.startswith(allow):raise RuntimeError('certificate path outside migration allowlist')
   if p.stat().st_size>1048576:raise RuntimeError('certificate metadata too large')
-  files[str(p)]=base64.b64encode(p.read_bytes()).decode()
+  files[norm]=base64.b64encode(p.read_bytes()).decode()
 print(json.dumps({'files':files,'cert':base64.b64encode(cert.read_bytes()).decode(),'key':base64.b64encode(key.read_bytes()).decode(),'config':base64.b64encode(cfg.encode()).decode(),'insecure':bool(selfsigned)}))`
-const writeMigrationTLS = `import json,base64,pathlib,re,os
+const writeMigrationTLS = `import json,base64,pathlib,posixpath,re,os
+allow=('/etc/hysteria/','/var/lib/hysteria/','/root/.cache/hysteria/','/root/.acme.sh/','/etc/letsencrypt/','/etc/ssl/')
 x=json.load(__import__('sys').stdin);r=pathlib.Path('/etc/hysteria');d=r/'cert';d.mkdir(mode=0o700,exist_ok=True)
 for k,name in [('cert','migration.crt'),('key','migration.key')]:
  p=d/name;p.write_bytes(base64.b64decode(x[k]));p.chmod(0o600)
 for name,data in x.get('files',{}).items():
- if not name.startswith(('/etc/hysteria/','/var/lib/hysteria/','/root/.cache/hysteria/','/root/.acme.sh/','/etc/letsencrypt/','/etc/ssl/')):raise RuntimeError('certificate path rejected')
- p=pathlib.Path(name);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(base64.b64decode(data));p.chmod(0o600)
+ norm=posixpath.normpath(name)
+ if norm!=name or '..' in pathlib.PurePosixPath(name).parts or not norm.startswith(allow):raise RuntimeError('certificate path rejected')
+ p=pathlib.Path(norm);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(base64.b64decode(data));p.chmod(0o600)
 cfg=base64.b64decode(x['config']).decode()
 if re.search(r'(?m)^tls:\s*$',cfg):
  cfg=re.sub(r'(?m)^(\s+cert:)\s*.+$',r'\1 /etc/hysteria/cert/migration.crt',cfg)
  cfg=re.sub(r'(?m)^(\s+key:)\s*.+$',r'\1 /etc/hysteria/cert/migration.key',cfg)
 p=r/'config.migration-original.yaml';p.write_text(cfg);p.chmod(0o600)`
+
+var migrationTLSAllowPrefixes = []string{
+	"/etc/hysteria/",
+	"/var/lib/hysteria/",
+	"/root/.cache/hysteria/",
+	"/root/.acme.sh/",
+	"/etc/letsencrypt/",
+	"/etc/ssl/",
+}
+
+// validMigrationTLSPath 在控制面侧复核迁移证书附件路径，防止被攻陷的旧节点返回含 ".." 穿越段的路径覆写新主机任意文件。
+func validMigrationTLSPath(raw string) bool {
+	if raw == "" || controlChars.MatchString(raw) || strings.Contains(raw, "\\") {
+		return false
+	}
+	allowed := false
+	for _, prefix := range migrationTLSAllowPrefixes {
+		if strings.HasPrefix(raw, prefix) {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return false
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return !strings.HasSuffix(raw, "/")
+}
 
 func migrationCertificate(ctx context.Context, c *ssh.Client, sudo string) (migrationTLS, error) {
 	var data migrationTLS
@@ -94,6 +130,11 @@ func migrationCertificate(ctx context.Context, c *ssh.Client, sudo string) (migr
 	}
 	if json.Unmarshal([]byte(strings.TrimSpace(out)), &data) != nil {
 		return data, errors.New("旧节点证书元数据无法解析")
+	}
+	for pathKey := range data.Files {
+		if !validMigrationTLSPath(pathKey) {
+			return data, errors.New("旧节点返回的证书附件路径不在安全白名单内")
+		}
 	}
 	cert, err := base64.StdEncoding.DecodeString(data.Cert)
 	if err != nil {

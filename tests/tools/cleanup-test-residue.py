@@ -15,9 +15,10 @@
 """
 import json, os, subprocess, sys, urllib.request
 
-BASE = "https://panel.example.com"
+BASE = os.environ.get("NODEOPS_BASE_URL", "https://panel.example.com").rstrip("/")
 KEY = os.environ.get("NODEOPS_TEST_STORE_KEY", "shop_TEST_ONLY_NOT_A_REAL_CREDENTIAL_0000000000")
 ALIAS = os.environ.get("NODEOPS_SSH_ALIAS", "panel-host")
+DB_CONTAINER = os.environ.get("PANEL_DB", "teyir-console-db-1")
 
 def ssh(cmd):
     r = subprocess.run(["ssh", "-o", "ConnectTimeout=12", "-o", "BatchMode=yes",
@@ -29,7 +30,7 @@ TEST_PREFIXES = ("REG-R", "BND-", "SEC-", "RACE-", "FMT-", "BUY-", "ord_", "prdo
 where = " OR ".join(f"order_id LIKE '{p}%'" for p in TEST_PREFIXES)
 sql = ("SELECT DISTINCT order_id FROM subscription_tokens WHERE deleted_at IS NULL "
        f"AND ({where})")
-raw = ssh("docker exec hy2-ops-console-db-1 psql -U nodeops -d nodeops -tA -c "
+raw = ssh(f"docker exec {DB_CONTAINER} psql -U nodeops -d nodeops -tA -c "
           + json.dumps(sql))
 oids = [l.strip() for l in raw.splitlines() if l.strip()]
 print("待吊销 order_id 数:", len(oids))
@@ -49,5 +50,5 @@ for oid in oids:
         if fail <= 5:
             print("  失败:", oid, e)
 print(f"成功 {ok}，失败 {fail}")
-print("剩余行数:", ssh("docker exec hy2-ops-console-db-1 psql -U nodeops -d nodeops -tA -c "
+print("剩余行数:", ssh(f"docker exec {DB_CONTAINER} psql -U nodeops -d nodeops -tA -c "
                      + json.dumps("SELECT count(*) FROM subscription_tokens WHERE deleted_at IS NULL")))

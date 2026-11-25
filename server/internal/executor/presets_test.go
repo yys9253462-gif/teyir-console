@@ -89,3 +89,15 @@ func TestMutatingPresetsFailWhenTheirCommandFails(t *testing.T) {
 		t.Error("a failed swapon must not leave a swap entry in fstab")
 	}
 }
+
+// 验证内核重启预设同时保护 teyir-console 与旧版 hy2-ops-console 面板宿主机，并校验非法 JSON 参数直接拦截。
+func TestKernelRebootProtectsTeyirConsoleAndInvalidPresetJSONRejected(t *testing.T) {
+	script := systemPresets["kernel_reboot"].Script
+	if !strings.Contains(script, "teyir-console") || !strings.Contains(script, "hy2-ops-console") {
+		t.Fatalf("kernel_reboot 必须同时匹配 teyir-console 与 hy2-ops-console 容器名，防止误重启面板宿主机")
+	}
+	e := &Executor{}
+	if _, _, err := e.runPreset(t.Context(), task{parameters: []byte(`{not-json`), allowWrite: true}); err == nil || !strings.Contains(err.Error(), "合法 JSON") {
+		t.Fatalf("非法 JSON 参数应直接报格式错误，实际: %v", err)
+	}
+}

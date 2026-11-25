@@ -33,6 +33,7 @@ import (
 	"net"
 	"net/http"
 	"nodeops/server/internal/portaltls"
+	"strings"
 	"time"
 )
 
@@ -116,8 +117,9 @@ func portalDialer(ctx context.Context, network, addr string) (net.Conn, error) {
 	// 它会**重新解析**一次：低 TTL 的 DNS 在校验与连接之间换成内网地址，
 	// 带着节点 API 密钥的请求就打进了内网（与 collector.safeDialContext 同一做法）。
 	// TLS 的 SNI/证书校验仍取 URL 里的域名，不受影响。
+	// 按 IPv4 优先依次回退尝试全部已校验地址，避免双栈域名首个 IPv6 不可达导致测速失败。
 	d := &net.Dialer{Timeout: 10 * time.Second}
-	return d.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+	return portaltls.DialCheckedIPs(ctx, d, network, port, ips)
 }
 
 // portalIPAllowed 判断一个解析结果能不能作为节点地址。
@@ -165,6 +167,8 @@ var errPortalNoSpeedtest = errors.New("节点 portal 尚未提供测速端点（
 // 返回的结果与 SSH 通道同构（[]Result），调用方可以直接落库。
 // 采不到时返回 errPortalNoSpeedtest 或具体错误，绝不返回"空结果但看起来成功"。
 func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string) ([]Result, error) {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	apiKey = strings.TrimSpace(apiKey)
 	if baseURL == "" || apiKey == "" {
 		return nil, errors.New("节点未绑定 portal API")
 	}
@@ -195,6 +199,13 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+		return nil, fmt.Errorf("节点 portal 返回重定向（HTTP %d），已拒绝跟随", resp.StatusCode)
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("节点 portal 鉴权失败（HTTP %d），请检查节点 API 密钥", resp.StatusCode)
+	}
+
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
 	if err != nil {
 		return nil, errors.New("读取节点响应失败")
@@ -220,6 +231,9 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 			return nil, errors.New("节点 portal 报错: " + parsed.Error)
 		}
 		return nil, fmt.Errorf("节点 portal 返回 %d", resp.StatusCode)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("节点 portal 返回异常状态码 %d", resp.StatusCode)
 	}
 	if len(parsed.Results) == 0 {
 		return nil, errors.New("节点 portal 返回 0 个靶点")

@@ -25,6 +25,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"nodeops/server/internal/portaltls"
@@ -183,7 +184,6 @@ func (c *Collector) collectSubscriptionUsage(ctx context.Context) {
 			// 节点上没有这个账号。**这不是"用量 0"** ——
 			// 是账号不存在（可能被节点侧手工删了、或还没生效）。
 			// 明确记成采集失败并说明原因，别让它看起来像"没流量"。
-			perNode[j.nodeID] = users
 			c.markUsageStale(ctx, j.subID, j.nodeID, j.userID, "节点上不存在该账号")
 			// 采集失败保留最后值；读取端按时间及健康标记判定未知。
 			continue
@@ -203,13 +203,7 @@ func (c *Collector) collectSubscriptionUsage(ctx context.Context) {
 		if !quality && reason == "" {
 			reason = "真实计量存在缺口或部分协议采集失败"
 		}
-		sources, gaps := u.MeasurementSources, u.MeasurementGaps
-		if len(sources) == 0 {
-			sources = json.RawMessage(`{}`)
-		}
-		if len(gaps) == 0 {
-			gaps = json.RawMessage(`[]`)
-		}
+		sources, gaps := normalizeJSONObject(u.MeasurementSources), normalizeJSONArray(u.MeasurementGaps)
 		if _, err := c.db.Exec(ctx, `
 INSERT INTO subscription_measured_usage
  (subscription_id,node_id,user_id,measured_bytes,started_at,quality_ok,error,sources,gaps,collected_at,current_ok,online_devices)
@@ -388,6 +382,11 @@ func (c *Collector) prefetchNodeUsers(ctx context.Context, targets []usageNodeTa
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, usagePrefetchConcurrency)
 	for _, t := range targets {
+		// 先检查上下文是否已结束，避免通道有空位时 select 伪随机继续派生已超时协程。
+		if ctx.Err() != nil {
+			wg.Wait()
+			return
+		}
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
@@ -494,11 +493,20 @@ func fetchPortalUsers(ctx context.Context, apiURL, apiKey string) ([]portalUserU
 	if len(body) > usageResponseLimit {
 		return nil, constErr("响应过大（超过 8 MiB），已拒绝解析")
 	}
+	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+		return nil, constErr(fmt.Sprintf("节点 API 返回重定向（HTTP %d），已拒绝跟随", resp.StatusCode))
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return nil, constErr("api_key 不被接受 (401)")
 	}
+	if resp.StatusCode == http.StatusForbidden {
+		return nil, constErr("api_key 无权限访问 (403)")
+	}
 	var parsed portalUsageEnvelope
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		if resp.StatusCode != http.StatusOK {
+			return nil, constErr(fmt.Sprintf("节点 API 返回 HTTP %d", resp.StatusCode))
+		}
 		return nil, constErr("响应不是合法 JSON")
 	}
 	if !parsed.OK {
@@ -509,6 +517,9 @@ func fetchPortalUsers(ctx context.Context, apiURL, apiKey string) ([]portalUserU
 		}
 		return nil, constErr("节点 API 未返回 ok")
 	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, constErr(fmt.Sprintf("节点 API 返回异常状态码 HTTP %d", resp.StatusCode))
+	}
 	applyEnvelopeGaps(parsed.Users, parsed.MeasurementGaps)
 	applyEnvelopeSources(parsed.Users, parsed.MeasurementSources)
 	return parsed.Users, nil
@@ -516,7 +527,8 @@ func fetchPortalUsers(ctx context.Context, apiURL, apiKey string) ([]portalUserU
 
 // applyEnvelopeSources 用户自己没带（或带的是空对象）measurement_sources 时，填入信封里的节点级那份。
 func applyEnvelopeSources(users []portalUserUsage, sources json.RawMessage) {
-	if len(sources) == 0 || string(sources) == "{}" || string(sources) == "null" {
+	trimmed := strings.TrimSpace(string(sources))
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
 		return
 	}
 	for i := range users {
@@ -527,16 +539,35 @@ func applyEnvelopeSources(users []portalUserUsage, sources json.RawMessage) {
 	}
 }
 
-// applyEnvelopeGaps 用户自己没带 measurement_gaps 时，填入信封里的节点级那份。
+// applyEnvelopeGaps 用户自己没带（或为 null）measurement_gaps 时，填入信封里的节点级那份。
 func applyEnvelopeGaps(users []portalUserUsage, gaps json.RawMessage) {
-	if len(gaps) == 0 {
+	trimmed := strings.TrimSpace(string(gaps))
+	if trimmed == "" || trimmed == "null" {
 		return
 	}
 	for i := range users {
-		if len(users[i].MeasurementGaps) == 0 {
+		own := strings.TrimSpace(string(users[i].MeasurementGaps))
+		if own == "" || own == "null" {
 			users[i].MeasurementGaps = gaps
 		}
 	}
+}
+
+// normalizeJSONObject 与 normalizeJSONArray 将空字节串或 JSON null 兜底为 {} / []，避免 jsonb 列落入 null。
+func normalizeJSONObject(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(`{}`)
+	}
+	return raw
+}
+
+func normalizeJSONArray(raw json.RawMessage) json.RawMessage {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(`[]`)
+	}
+	return raw
 }
 
 // 兼容旧门户；新版明确区分历史值，绝不把真实累计再写成历史。

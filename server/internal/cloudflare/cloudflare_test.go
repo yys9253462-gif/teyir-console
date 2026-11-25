@@ -214,3 +214,57 @@ func TestUpsertAKeepsRecordComment(t *testing.T) {
 		t.Fatalf("update must change the IP and keep the comment: %+v", rec)
 	}
 }
+
+// 验证域名空白/尾点与 IPv4 映射地址归一化，以及异常满页响应触发分页硬上限。
+func TestUpsertANormalizesAndCapsPagination(t *testing.T) {
+	var rec map[string]any
+	srv := fakeCF(t, &rec)
+	defer srv.Close()
+	c := &Client{Token: " tok ", Base: srv.URL + "/", HTTP: srv.Client()}
+
+	if got, err := c.UpsertA(context.Background(), " hy2.node.example.com. ", " ::ffff:1.2.3.4 "); err != nil || got != "created" {
+		t.Fatalf("归一化后的域名与 IPv4 映射地址应成功创建: got=%q err=%v", got, err)
+	}
+	if rec["name"] != "hy2.node.example.com" || rec["content"] != "1.2.3.4" {
+		t.Fatalf("写入的域名或 IPv4 未归一化: %+v", rec)
+	}
+	if _, err := c.UpsertA(context.Background(), "   ", "1.2.3.4"); err == nil {
+		t.Fatal("空域名必须报错")
+	}
+
+	// 模拟上游永远返回 100 条满页记录，验证达到分页上限后中止，不陷入死循环。
+	pages := 0
+	loopSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/zones" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": []map[string]string{{"id": "z1", "name": "example.com"}}})
+			return
+		}
+		pages++
+		batch := make([]map[string]any, 100)
+		for i := range batch {
+			batch[i] = map[string]any{"id": fmt.Sprintf("r-%d-%d", pages, i), "name": "hy2.example.com", "content": "1.2.3.4", "proxied": false}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": batch})
+	}))
+	defer loopSrv.Close()
+	loopClient := &Client{Token: "tok", Base: loopSrv.URL, HTTP: loopSrv.Client()}
+	if _, err := loopClient.UpsertARecords(context.Background(), "hy2.example.com", "1.2.3.4"); err == nil || !strings.Contains(err.Error(), "分页超过上限") {
+		t.Fatalf("超限分页必须报错中止，实际: err=%v pages=%d", err, pages)
+	}
+	if pages != maxDNSRecordPages {
+		t.Fatalf("分页请求次数应恰好等于上限 %d，实际 %d", maxDNSRecordPages, pages)
+	}
+
+	// 上游返回结构异常时不得静默吞掉 JSON 解析错误。
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"success":true,"result":"not-an-array"}`))
+	}))
+	defer badSrv.Close()
+	badClient := &Client{Token: "tok", Base: badSrv.URL, HTTP: badSrv.Client()}
+	if _, _, err := badClient.FindZone(context.Background(), "a.example.com"); err == nil || !strings.Contains(err.Error(), "无法解析") {
+		t.Fatalf("FindZone 不应静默吞掉解析错误: %v", err)
+	}
+	if _, err := badClient.ListZones(context.Background()); err == nil || !strings.Contains(err.Error(), "无法解析") {
+		t.Fatalf("ListZones 不应静默吞掉解析错误: %v", err)
+	}
+}

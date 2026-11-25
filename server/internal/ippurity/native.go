@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -71,10 +72,11 @@ type rdapNetwork struct {
 // RegistrationCountry 查询 IP 段的注册国家（ISO 两位大写）。
 // 返回的 registry 是 RIR 名（如 "whois.apnic.net"），排障用。
 func RegistrationCountry(ctx context.Context, ip string) (country, registry string, err error) {
+	ip = strings.TrimSpace(ip)
 	if !IsPublicIP(ip) {
 		return "", "", errors.New("不是可查询的公网 IP")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rdapBootstrap+ip, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rdapBootstrap+url.PathEscape(ip), nil)
 	if err != nil {
 		return "", "", err
 	}
@@ -99,7 +101,7 @@ func RegistrationCountry(ctx context.Context, ip string) (country, registry stri
 }
 
 func countryFromRDAP(n rdapNetwork) (string, bool) {
-	if c := strings.ToUpper(strings.TrimSpace(n.Country)); len(c) == 2 {
+	if c := strings.ToUpper(strings.TrimSpace(n.Country)); isASCIIAlpha2(c) {
 		return c, true
 	}
 	// ARIN：取 registrant 实体的地址国家。只认 registrant —— abuse / noc
@@ -174,11 +176,25 @@ func countryCode(s string) (string, bool) {
 	if s == "" {
 		return "", false
 	}
-	if len(s) == 2 {
+	if isASCIIAlpha2(s) {
 		return strings.ToUpper(s), true
 	}
 	c, ok := countryNameToCode[strings.ToLower(s)]
 	return c, ok
+}
+
+// isASCIIAlpha2 判断字符串是否恰好为两位英文字母，避免将 "--" 或数字串误判为国家码。
+func isASCIIAlpha2(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for i := 0; i < 2; i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			return false
+		}
+	}
+	return true
 }
 
 var countryNameToCode = map[string]string{

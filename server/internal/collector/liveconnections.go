@@ -19,9 +19,7 @@ func (c *Collector) replaceLiveConnection(ctx context.Context, sub, node, user s
 	if snapshot != nil {
 		u = *snapshot
 	}
-	if len(u.IPs) == 0 {
-		u.IPs = json.RawMessage(`[]`)
-	}
+	u.IPs = normalizeJSONArray(u.IPs)
 	_, err := c.db.Exec(ctx, `INSERT INTO subscription_live_connections
  (subscription_id,node_id,user_id,ips,ok,error,hysteria_ok,reality_ok,reality_error,collected_at)
  VALUES($1::uuid,$2::uuid,$3,$4::jsonb,$5,$6,$7,$8,$9,now())

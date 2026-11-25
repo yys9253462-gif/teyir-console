@@ -131,7 +131,10 @@ function NodeUsers({ node, notify }: { node: Hy2Node; notify: (message: string) 
     }
   }, [node.id])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { usersSeq.current += 1 }
+  }, [load])
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return
@@ -197,8 +200,8 @@ function NodeUsers({ node, notify }: { node: Hy2Node; notify: (message: string) 
             <div className="service-actions">
               {/* 2026-11-06：机主账号与订阅账号（sub_*）后端拒绝在这里续期 / 删除（到期、停用由订阅中心统一管理）；
                   原来按钮照常可点，填完表单才收到 400。 */}
-              <button className="button button-quiet button-compact" disabled={readOnly || managed} title={managed ? managedHint : undefined} onClick={() => setRenewing(user)}>续期</button>
-              <button className="button button-quiet button-compact" disabled={readOnly || !isAdminSession() || managed} title={managed ? managedHint : "删除用户"} onClick={() => setPendingDelete(user)}><Trash2 size={13} />删除</button>
+              <button className="button button-quiet button-compact" disabled={readOnly || managed} title={managed ? managedHint : readOnly ? '只读账号不能续期用户' : '续期用户'} onClick={() => setRenewing(user)}>续期</button>
+              <button className="button button-quiet button-compact" disabled={readOnly || !isAdminSession() || managed} title={managed ? managedHint : !isAdminSession() ? '仅管理员可删除用户' : '删除用户'} onClick={() => setPendingDelete(user)}><Trash2 size={13} />删除</button>
             </div>
           </div>
         )
@@ -213,7 +216,7 @@ function NodeUsers({ node, notify }: { node: Hy2Node; notify: (message: string) 
       {pendingDelete && (
         <Modal title="删除节点用户" kicker="CONFIRM DELETE" onClose={() => { if (!deleting) setPendingDelete(null) }}>
           <p className="form-note">即将从节点 <strong>{node.name}</strong> 的 portal 删除用户 <strong>{pendingDelete.user_id}</strong>。该用户的订阅链接会立即失效，且无法恢复。</p>
-          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button><button className="button button-primary" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button><button className="button button-danger" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
         </Modal>
       )}
       {created && <CreatedUserDialog result={created} node={node} notify={notify} onClose={() => setCreated(null)} />}
@@ -404,7 +407,10 @@ function NodeProxyServices({ node, notify }: { node: Hy2Node; notify: (message: 
     }
   }, [node.id])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { servicesSeq.current += 1 }
+  }, [load])
 
   async function confirmDelete() {
     if (!pendingDelete || deleting) return
@@ -454,7 +460,7 @@ function NodeProxyServices({ node, notify }: { node: Hy2Node; notify: (message: 
             ? <span className="status-pill offline">gost 未运行</span>
             : <span className="status-pill unknown">状态未知</span>
         const host = service.host || gostState.host
-        const created = service.created_at ? new Date(service.created_at * 1000).toLocaleString() : null
+        const created = service.created_at ? new Date(service.created_at * 1000).toLocaleString('zh-CN', { hour12: false }) : null
         return (
           <div className="service-row" key={service.id}>
             <div className="service-identity">
@@ -492,7 +498,7 @@ function NodeProxyServices({ node, notify }: { node: Hy2Node; notify: (message: 
       {pendingDelete && (
         <Modal title="删除代理服务" kicker="CONFIRM DELETE" onClose={() => { if (!deleting) setPendingDelete(null) }}>
           <p className="form-note">即将删除节点 <strong>{node.name}</strong> 上的代理服务 <strong>{pendingDelete.type} :{pendingDelete.port}</strong>。依赖该代理的客户端会立即断线。</p>
-          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button><button className="button button-primary" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => setPendingDelete(null)}>取消</button><button className="button button-danger" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
         </Modal>
       )}
     </>
@@ -570,12 +576,14 @@ function NodeStatus({ node }: { node: Hy2Node }) {
     }
   }, [node.id])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { overviewSeq.current += 1 }
+  }, [load])
 
-  // Each read reports its own outcome. A failed read shows the reason in place
-  // rather than a blank that could be mistaken for "nothing there".
-  const failed = overview
-    ? (Object.entries(overview.probes) as Array<[string, { available: boolean; error?: string }]>).filter(([, state]) => !state.available)
+  // 每项探测各自上报结果，失败时原位展示原因，避免空白被误判为无数据。
+  const failed = overview?.probes
+    ? (Object.entries(overview.probes) as Array<[string, { available: boolean; error?: string }]>).filter(([, state]) => state && !state.available)
     : []
 
   const summary = overview?.summary
@@ -607,7 +615,7 @@ function NodeStatus({ node }: { node: Hy2Node }) {
         </p>
       )}
 
-      {overview && summary && (
+      {overview && summary && overview.meta && (
         <>
           <div className="drawer-info-grid">
             <div><span>监听端口</span><strong>{overview.meta.listen_port || '—'}</strong></div>
@@ -829,8 +837,9 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
   }, [load, refreshDelivery])
 
   const run = useCallback(async (action: OpsAction) => {
+    if (loadSession()?.role === 'viewer' || (portalActionAdminOnly(action.verb, action.dangerous) && !isAdminSession())) return
     if (action.dangerous && !await askConfirm(`确认执行「${action.label}」？\n\n${action.hint}`)) return
-    if (!active.current || loadSession()?.role === "viewer") return
+    if (!active.current) return
     setBusy(action.verb)
     try {
       if (action.verb === 'upgrade_portal') {
@@ -960,7 +969,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
 
       {p && (
         <div className="overview-grid">
-          {showCard('实时速率') && (
+          {showCard('实时速率') && p.speed && (
           <div className="overview-card">
             <div className="overview-card-head"><Zap size={12} /> 实时速率</div>
             {p.speed.state === 'healthy' && p.speed.payload ? (
@@ -978,7 +987,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           </div>
           )}
 
-          {showCard('版本') && (
+          {showCard('版本') && p.version && (
           <div className="overview-card">
             <div className="overview-card-head">版本</div>
             {p.version.state === 'healthy' && p.version.payload ? (
@@ -997,7 +1006,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           </div>
           )}
 
-          {showCard('BBR') && (
+          {showCard('BBR') && p.bbr && (
           <div className="overview-card">
             <div className="overview-card-head">BBR</div>
             {p.bbr.state === 'healthy' && p.bbr.payload ? (
@@ -1014,7 +1023,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           </div>
           )}
 
-          {showCard('Reality') && (
+          {showCard('Reality') && p.reality && (
           <div className="overview-card">
             <div className="overview-card-head">Reality</div>
             {p.reality.state === 'healthy' && p.reality.payload ? (
@@ -1081,7 +1090,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           </div>
           )}
 
-          {showCard('WARP') && (
+          {showCard('WARP') && p.warp && (
           <div className="overview-card">
             <div className="overview-card-head">WARP</div>
             {p.warp.state === 'healthy' && p.warp.payload ? (
@@ -1099,7 +1108,7 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           </div>
           )}
 
-          {showCard('AmneziaWG') && (
+          {showCard('AmneziaWG') && p.awg && (
           <div className="overview-card">
             <div className="overview-card-head">AmneziaWG</div>
             {p.awg.state === 'healthy' && p.awg.payload ? (
@@ -1132,13 +1141,14 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
           <div className="ops-actions">
             {OPS_ACTIONS.filter((a) => a.group === group && a.verb !== 'set_bbr').map((action) => {
               const blocked = blockedBy(action)
+              const isViewer = loadSession()?.role === 'viewer'
               const adminOnly = portalActionAdminOnly(action.verb, action.dangerous) && !isAdminSession()
               return (
                 <button
                   key={action.verb}
                   className={`button button-compact ${action.dangerous ? 'button-danger' : 'button-quiet'}`}
-                  title={adminOnly ? ADMIN_ONLY_HINT : (blocked ?? action.hint)}
-                  disabled={loadSession()?.role === "viewer" || adminOnly || busy !== null || blocked !== null}
+                  title={isViewer ? '只读账号不能执行节点运维操作' : adminOnly ? ADMIN_ONLY_HINT : (blocked ?? action.hint)}
+                  disabled={isViewer || adminOnly || busy !== null || blocked !== null}
                   onClick={() => void run(action)}
                 >
                   {busy === action.verb
@@ -1153,8 +1163,8 @@ function NodeOps({ node, notify }: { node: Hy2Node; notify: (message: string) =>
               <button
                 key={version}
                 className="button button-compact button-quiet"
-                title={`切换拥塞控制算法到 BBR ${version.toUpperCase()}`}
-                disabled={loadSession()?.role === "viewer" || busy !== null}
+                title={loadSession()?.role === 'viewer' ? '只读账号不能调整 BBR 配置' : `切换拥塞控制算法到 BBR ${version.toUpperCase()}`}
+                disabled={loadSession()?.role === 'viewer' || busy !== null}
                 onClick={() => void runBBR(version)}
               >
                 {busy === 'set_bbr' ? <Loader2 size={13} className="spin" /> : <Zap size={13} />}

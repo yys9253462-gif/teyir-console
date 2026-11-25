@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, Clock, Cpu, Database, Eye, KeyRound, LayoutDashboard, Lock, Palette, Plus,
   Search, Server as ServerIcon, ShieldCheck, Trash2, UserCog, Users, Send,
@@ -93,12 +93,16 @@ function auditTone(action: string): string {
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return '—'
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
 }
 
 function formatRelative(iso: string | null): string {
   if (!iso) return '从未'
-  const diff = Date.now() - new Date(iso).getTime()
+  const date = new Date(iso)
+  const ts = date.getTime()
+  if (Number.isNaN(ts)) return '—'
+  const diff = Date.now() - ts
   const m = Math.floor(diff / 60000)
   if (m < 1) return '刚刚'
   if (m < 60) return `${m} 分钟前`
@@ -106,7 +110,7 @@ function formatRelative(iso: string | null): string {
   if (h < 24) return `${h} 小时前`
   const d = Math.floor(h / 24)
   if (d < 30) return `${d} 天前`
-  return new Date(iso).toLocaleDateString('zh-CN')
+  return date.toLocaleDateString('zh-CN')
 }
 
 function loadSection(): SectionKey {
@@ -144,6 +148,16 @@ export function SettingsPage({ servers, session, onChanged, notify, appearance }
   const [pwValue, setPwValue] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<UserAccount | null>(null)
   const [savingRole, setSavingRole] = useState('')
+  const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
 
   const sections = useMemo(() => ([
     { key: 'overview', label: '概览', Icon: LayoutDashboard, show: true },
@@ -165,6 +179,7 @@ export function SettingsPage({ servers, session, onChanged, notify, appearance }
   }
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     const failed: { users?: string; audit?: string } = {}
     const why = (err: unknown) => (err instanceof Error ? err.message : '读取失败')
     const [status, accountList, auditList] = await Promise.all([
@@ -172,6 +187,7 @@ export function SettingsPage({ servers, session, onChanged, notify, appearance }
       isAdmin ? api.users().catch((err) => { failed.users = why(err); return null }) : Promise.resolve([]),
       isAdmin ? api.auditLogs(auditLimit).catch((err) => { failed.audit = why(err); return null }) : Promise.resolve([]),
     ])
+    if (!mountedRef.current || seq !== loadSeq.current) return
     setRuntime(status)
     if (accountList) setUsers(accountList)
     if (auditList) setAudit(auditList)
@@ -181,84 +197,94 @@ export function SettingsPage({ servers, session, onChanged, notify, appearance }
   useEffect(() => { void load() }, [load])
 
   async function changePassword() {
+    if (busy) return
     if (next.length < 12) return notify('新密码至少 12 个字符')
     if (next !== confirmNext) return notify('两次输入的新密码不一致')
     setBusy(true)
     try {
       const res = await api.changePassword(current, next)
+      if (!mountedRef.current) return
       setCurrent(''); setNext(''); setConfirmNext('')
       notify(res.token ? '密码已更新，其它设备上的登录已失效' : '密码已更新，请重新登录')
       await load()
     } catch (err) {
-      notify(err instanceof Error ? `修改失败：${err.message}` : '修改失败')
+      if (mountedRef.current) notify(err instanceof Error ? `修改失败：${err.message}` : '修改失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function changeRole(user: UserAccount, role: UserAccount['role']) {
-    if (role === user.role) return
+    if (role === user.role || savingRole) return
     // 2026-11-06：设为管理员先确认。下拉框一改即生效：误选一次就把账号、密钥、商城对接、主机凭据的全部权限交了出去。
     if (role === 'admin' && !await askConfirm(`把 ${user.email} 设为管理员？
 
 管理员可以管理账号、集成密钥、商城对接与主机凭据，并能删除节点和订阅。`, { confirmText: '设为管理员', danger: true })) return
+    if (!mountedRef.current) return
     setSavingRole(user.id)
     try {
       await api.updateUser(user.id, role)
+      if (!mountedRef.current) return
       notify(`已更新角色：${user.email} → ${ROLE_META[role].label}`)
       await Promise.all([load(), onChanged()])
     } catch (err) {
-      notify(err instanceof Error ? `角色更新失败：${err.message}` : '角色更新失败')
+      if (mountedRef.current) notify(err instanceof Error ? `角色更新失败：${err.message}` : '角色更新失败')
     } finally {
-      setSavingRole('')
+      if (mountedRef.current) setSavingRole('')
     }
   }
 
   async function resetPassword() {
-    if (!pwTarget) return
+    if (!pwTarget || busy) return
     if (pwValue.length < 12) return notify('新密码至少 12 个字符')
     setBusy(true)
     try {
       await api.resetUserPassword(pwTarget.id, pwValue)
+      if (!mountedRef.current) return
       notify(`已重置密码：${pwTarget.email}`)
       setPwTarget(null); setPwValue('')
       await load()
     } catch (err) {
-      notify(err instanceof Error ? `重置失败：${err.message}` : '重置失败')
+      if (mountedRef.current) notify(err instanceof Error ? `重置失败：${err.message}` : '重置失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function removeUser() {
-    if (!deleteTarget) return
+    if (!deleteTarget || busy) return
     const target = deleteTarget
     setDeleteTarget(null)
     setBusy(true)
     try {
       await api.deleteUser(target.id)
+      if (!mountedRef.current) return
       notify(`已删除账号：${target.email}`)
       await Promise.all([load(), onChanged()])
     } catch (err) {
-      notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
+      if (mountedRef.current) notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function createUser() {
-    if (!draftUser.email.trim() || draftUser.password.length < 12) return notify('邮箱必填，密码至少 12 个字符')
+    if (busy) return
+    const email = draftUser.email.trim()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return notify('请输入有效的邮箱地址')
+    if (draftUser.password.length < 12) return notify('密码至少 12 个字符')
     setBusy(true)
     try {
-      await api.createUser(draftUser)
-      notify(`已创建账号：${draftUser.email}`)
+      await api.createUser({ ...draftUser, email })
+      if (!mountedRef.current) return
+      notify(`已创建账号：${email}`)
       setAddingUser(false)
       setDraftUser({ email: '', password: '', role: 'operator' })
       await Promise.all([load(), onChanged()])
     } catch (err) {
-      notify(err instanceof Error ? `创建失败：${err.message}` : '创建失败')
+      if (mountedRef.current) notify(err instanceof Error ? `创建失败：${err.message}` : '创建失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -454,7 +480,7 @@ export function SettingsPage({ servers, session, onChanged, notify, appearance }
       {deleteTarget && (
         <Modal title="删除账号" kicker="CONFIRM DELETE" onClose={() => setDeleteTarget(null)}>
           <p className="form-note">即将删除账号 <strong>{deleteTarget.email}</strong>（{ROLE_META[deleteTarget.role]?.label ?? deleteTarget.role}）。删除后该账号无法登录，其历史审计记录保留。</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={() => setDeleteTarget(null)}>取消</button><button className="button button-primary" onClick={removeUser}>确认删除</button></div>
+          <div className="modal-actions"><button className="button button-quiet" onClick={() => setDeleteTarget(null)}>取消</button><button className="button button-danger" disabled={busy} onClick={removeUser}>{busy ? '删除中…' : '确认删除'}</button></div>
         </Modal>
       )}
     </>

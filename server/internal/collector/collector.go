@@ -33,6 +33,12 @@ type Collector struct {
 	box        *secrets.Box
 	sshRetryMu sync.Mutex
 	sshRetry   map[string]sshRetryEntry
+	// 使用互斥锁与完成通道协同管理启停生命周期，避免 sync.WaitGroup 并发 Add 与 Wait 竞态。
+	runMu      sync.Mutex
+	activeRuns int
+	runDone    chan struct{}
+	// runBody 仅用于包内单测注入可控循环体，生产路径保持 nil 走默认采集循环。
+	runBody func(context.Context)
 }
 
 func NewCollector(logger *slog.Logger, db *pgxpool.Pool, intervalSeconds int, box *secrets.Box) *Collector {
@@ -40,6 +46,47 @@ func NewCollector(logger *slog.Logger, db *pgxpool.Pool, intervalSeconds int, bo
 		intervalSeconds = 30
 	}
 	return &Collector{logger: logger, db: db, interval: time.Duration(intervalSeconds) * time.Second, box: box, sshRetry: make(map[string]sshRetryEntry)}
+}
+
+func (c *Collector) beginRun() {
+	c.runMu.Lock()
+	if c.activeRuns == 0 {
+		c.runDone = make(chan struct{})
+	}
+	c.activeRuns++
+	c.runMu.Unlock()
+}
+
+func (c *Collector) endRun() {
+	c.runMu.Lock()
+	c.activeRuns--
+	if c.activeRuns == 0 && c.runDone != nil {
+		close(c.runDone)
+		c.runDone = nil
+	}
+	c.runMu.Unlock()
+}
+
+// Start 在当前协程同步登记生命周期后派生后台采集协程，避免紧接调用 Wait 时出现竞态或抢跑。
+func (c *Collector) Start(ctx context.Context) {
+	c.beginRun()
+	go func() {
+		defer c.endRun()
+		c.executeRun(ctx)
+	}()
+}
+
+// Wait 等待全部已登记的采集循环完成收尾退出，供进程优雅停机阶段调用。
+func (c *Collector) Wait() {
+	for {
+		c.runMu.Lock()
+		done := c.runDone
+		c.runMu.Unlock()
+		if done == nil {
+			return
+		}
+		<-done
+	}
 }
 
 type sshRetryEntry struct {
@@ -79,7 +126,28 @@ func (c *Collector) setSSHRetry(t target, failed bool) {
 	}
 }
 
+// pruneSSHRetry 清理已过期或已从活跃主机列表中移除的冷却记录，防止长期运行后内存持续增长。
+func (c *Collector) pruneSSHRetry(active map[string]struct{}, now time.Time) {
+	c.sshRetryMu.Lock()
+	defer c.sshRetryMu.Unlock()
+	for id, entry := range c.sshRetry {
+		if _, ok := active[id]; !ok || !now.Before(entry.retryAfter) {
+			delete(c.sshRetry, id)
+		}
+	}
+}
+
 func (c *Collector) Run(ctx context.Context) {
+	c.beginRun()
+	defer c.endRun()
+	c.executeRun(ctx)
+}
+
+func (c *Collector) executeRun(ctx context.Context) {
+	if c.runBody != nil {
+		c.runBody(ctx)
+		return
+	}
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
 	c.collectOnce(ctx)
@@ -182,6 +250,11 @@ LEFT JOIN LATERAL (
 		c.logger.Warn("collector: read servers failed", "error", err)
 		return
 	}
+	activeIDs := make(map[string]struct{}, len(targets))
+	for _, t := range targets {
+		activeIDs[t.id] = struct{}{}
+	}
+	c.pruneSSHRetry(activeIDs, time.Now())
 
 	// Collect hosts concurrently. A serial loop meant one slow or unreachable host
 	// (25s timeout) delayed every host behind it, so the cycle overran its own
@@ -336,7 +409,7 @@ func (c *Collector) collectServer(parent context.Context, t target) {
 	c.setSSHRetry(t, false)
 
 	if t.fingerprint == "" && fingerprint != "" {
-		tag, err := c.db.Exec(hostCtx, `UPDATE servers SET host_fingerprint=$1 WHERE id=$2 AND host_fingerprint IS NULL`, fingerprint, t.id)
+		tag, err := c.db.Exec(hostCtx, `UPDATE servers SET host_fingerprint=$1 WHERE id=$2 AND host_fingerprint IS NULL AND deleted_at IS NULL`, fingerprint, t.id)
 		if err != nil {
 			c.logger.Warn("collector: pin host key failed", "server", t.name, "error", err)
 		} else if tag.RowsAffected() == 1 {
@@ -439,10 +512,7 @@ UPDATE servers
 		diskPercent = float64(diskUsed) * 100 / float64(diskTotal)
 	}
 
-	loadJSON := "[]"
-	if values["LOAD"] != "" {
-		loadJSON = "[" + strings.ReplaceAll(values["LOAD"], " ", ",") + "]"
-	}
+	loadJSON := formatLoadAverageJSON(values["LOAD"])
 	if _, err := c.db.Exec(hostCtx, `INSERT INTO server_metrics (server_id, sampled_at, cpu_percent, memory_used_bytes, memory_total_bytes, disk_used_bytes, disk_total_bytes, load_average)
 VALUES ($1, now(), $2, $3, $4, $5, $6, $7::jsonb)`, t.id, cpu, memUsed, memTotal, diskUsed, diskTotal, loadJSON); err != nil {
 		c.logger.Warn("collector: insert metrics failed", "server", t.name, "error", err)
@@ -457,12 +527,12 @@ VALUES ($1, now(), $2, $3, $4, $5, $6, $7::jsonb)`, t.id, cpu, memUsed, memTotal
 	_ = c.db.QueryRow(hostCtx, `SELECT COALESCE(avg(cpu_percent), $2) FROM (
 SELECT cpu_percent FROM server_metrics WHERE server_id=$1 ORDER BY sampled_at DESC LIMIT 3) recent`, t.id, cpu).Scan(&cpuAvg)
 	var prevStatus string
-	_ = c.db.QueryRow(hostCtx, `SELECT status FROM servers WHERE id=$1`, t.id).Scan(&prevStatus)
+	_ = c.db.QueryRow(hostCtx, `SELECT status FROM servers WHERE id=$1 AND deleted_at IS NULL`, t.id).Scan(&prevStatus)
 	status := resourceStatus(prevStatus, cpuAvg, diskPercent)
 	// consecutive_host_failures 在此归零：本轮 metrics 脚本跑通了，说明主机
 	// 侧采集链路是好的。与 status 同一条 UPDATE 写入，避免「状态改了计数没改」
 	// 导致下一轮一开始就被判成 warning（见审计 P0-2）。
-	if _, err := c.db.Exec(hostCtx, `UPDATE servers SET status=$1, latency_ms=$2, status_error='', consecutive_host_failures=0, updated_at=now(), os_info=jsonb_set(os_info, '{kernel}', to_jsonb($3::text)) WHERE id=$4`, status, latencyMs, values["KERNEL"], t.id); err != nil {
+	if _, err := c.db.Exec(hostCtx, `UPDATE servers SET status=$1, latency_ms=$2, status_error='', consecutive_host_failures=0, updated_at=now(), os_info=jsonb_set(COALESCE(os_info, '{}'::jsonb), '{kernel}', to_jsonb($3::text)) WHERE id=$4 AND deleted_at IS NULL`, status, latencyMs, values["KERNEL"], t.id); err != nil {
 		c.logger.Warn("collector: update status failed", "server", t.name, "error", err)
 	}
 	c.probeNodes(hostCtx, client, t)
@@ -527,7 +597,7 @@ func (c *Collector) markServerSSHBroken(ctx context.Context, serverID string, ca
 	if _, err := c.db.Exec(ctx, `
 UPDATE servers
    SET status_error = $2, updated_at = now()
- WHERE id = $1`, serverID, "SSH 凭据失效: "+shortSSHErr(cause)); err != nil {
+ WHERE id = $1 AND deleted_at IS NULL`, serverID, "SSH 凭据失效: "+shortSSHErr(cause)); err != nil {
 		c.logger.Warn("collector: 记录 SSH 失效失败", "server_id", serverID, "error", err)
 	}
 }
@@ -641,7 +711,7 @@ SELECT id, name, COALESCE(api_url,''), api_key
 	if len(nodes) == 0 {
 		// 主机行存在但没有节点（可能是删剩的空壳）。
 		// 标成 unknown 而不是 offline —— 我们**没测过**，不该断言它挂了。
-		if _, err := c.db.Exec(ctx, `UPDATE servers SET status='unknown', latency_ms=NULL, updated_at=now() WHERE id=$1`, t.id); err != nil {
+		if _, err := c.db.Exec(ctx, `UPDATE servers SET status='unknown', latency_ms=NULL, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, t.id); err != nil {
 			c.logger.Warn("collector: mark unknown failed", "server", t.name, "error", err)
 		}
 		return
@@ -1106,6 +1176,28 @@ func parseFloat(s string) float64 {
 	return v
 }
 
+// formatLoadAverageJSON 将 /proc/loadavg 前三段数值安全编码为合法的 JSON 数字数组，
+// 防止多余空格、制表符或异常字符拼出非法 JSON 导致整条主机指标插入失败。
+func formatLoadAverageJSON(raw string) string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return "[]"
+	}
+	nums := make([]float64, 0, len(fields))
+	for _, f := range fields {
+		v, err := strconv.ParseFloat(f, 64)
+		if err != nil || math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+			return "[]"
+		}
+		nums = append(nums, v)
+	}
+	encoded, err := json.Marshal(nums)
+	if err != nil {
+		return "[]"
+	}
+	return string(encoded)
+}
+
 func parseInt(s string) int64 {
 	v, _ := strconv.ParseInt(s, 10, 64)
 	return v
@@ -1167,7 +1259,10 @@ url=sys.argv[2].rstrip('/')+'/traffic'
 epoch=subprocess.check_output(['systemctl','show','hysteria-server','--property=InvocationID','--value']).decode().strip()
 p=pathlib.Path('/var/lib/hy2-ops-traffic')/(hashlib.sha256(url.encode()).hexdigest()+'.json')
 # Read the old cursor BEFORE sampling; never create or advance it here.
-old=json.loads(p.read_text()) if p.exists() else None
+try:
+ old=json.loads(p.read_text()) if p.exists() else None
+except Exception:
+ old=None
 req=urllib.request.Request(url,headers={'Authorization':secret})
 with urllib.request.urlopen(req,timeout=5) as r: current=json.load(r)
 print('TRAFFIC='+json.dumps({'epoch':epoch,'counters':current,'observed_ns':time.time_ns(),'bootstrap':old}))

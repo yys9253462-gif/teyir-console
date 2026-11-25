@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Activity, Ban, Clock3, RotateCcw, Send, Server as ServerIcon } from 'lucide-react'
 import { api, isAdminSession, loadSession, ADMIN_ONLY_HINT, type OperationTask, type Server, type ServiceOperation, type TaskLog } from '../lib/api'
 import { Modal } from './Modal'
@@ -50,7 +50,13 @@ const taskStatusClass: Record<OperationTask['status'], string> = {
 }
 
 function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+function formatLogClock(iso: string): string {
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
 const VIEWER_HINT = '只读账号不能下发、取消或重试任务'
@@ -75,6 +81,18 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
   const [targetId, setTargetId] = useState('')
   const [unit, setUnit] = useState('hysteria-server')
   const [pendingRetry, setPendingRetry] = useState<OperationTask | null>(null)
+  const mountedRef = useRef(true)
+  // 当前展开的任务 id：慢响应回来时据此丢弃过期结果（2026-11-04）。原来先点 A 再点 B，
+  // A 的日志晚到就会显示在 B 的标题下 —— 排查「为什么重启失败」时读到的是另一条任务的输出。
+  const logsFor = useRef<string | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      logsFor.current = null
+    }
+  }, [])
 
   const target = servers.find((server) => server.id === targetId) ?? servers.find((server) => server.has_credential) ?? servers[0]
 
@@ -83,25 +101,28 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
     setCancelingId(task.id)
     try {
       await api.cancelTask(task.id)
+      if (!mountedRef.current) return
       notify(`已取消任务 ${task.id.slice(0, 8)}`)
       await onChanged()
     } catch (err) {
-      notify(err instanceof Error ? `取消失败：${err.message}` : '取消失败')
+      if (mountedRef.current) notify(err instanceof Error ? `取消失败：${err.message}` : '取消失败')
     } finally {
-      setCancelingId('')
+      if (mountedRef.current) setCancelingId('')
     }
   }
 
   async function runRetry(task: OperationTask, dangerous: boolean) {
+    if (retrying) return
     setRetrying(true)
     try {
       const created = await api.retryTask(task.id, dangerous)
+      if (!mountedRef.current) return
       notify(`已重新入队任务 ${created.id.slice(0, 8)}（${operationLabel(task.operation_type)}）`)
       await onChanged()
     } catch (err) {
-      notify(err instanceof Error ? `重试失败：${err.message}` : '重试失败')
+      if (mountedRef.current) notify(err instanceof Error ? `重试失败：${err.message}` : '重试失败')
     } finally {
-      setRetrying(false)
+      if (mountedRef.current) setRetrying(false)
     }
   }
 
@@ -113,6 +134,7 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
   }
 
   async function dispatch(operation: ServiceOperation) {
+    if (dispatching) return
     if (!target) {
       notify('请先添加一台主机')
       return
@@ -124,21 +146,19 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
     if (WRITE_OPS.has(operation) && !await askConfirm(`确认对 ${target.name} 执行「${operationLabel(operation)}」？
 
 服务：${serviceUnit}。正在使用这台主机的客户端可能会断线。`, { danger: operation === 'stop' })) return
+    if (!mountedRef.current) return
     setDispatching(true)
     try {
       await api.createTask({ server_id: target.id, operation_type: operation, parameters: { source: 'console', unit: serviceUnit } })
+      if (!mountedRef.current) return
       notify(`已下发 ${operationLabel(operation)} · ${target.name}（约 20 秒内被领取）`)
       await onChanged()
     } catch (err) {
-      notify(err instanceof Error ? `下发失败：${err.message}` : '下发失败')
+      if (mountedRef.current) notify(err instanceof Error ? `下发失败：${err.message}` : '下发失败')
     } finally {
-      setDispatching(false)
+      if (mountedRef.current) setDispatching(false)
     }
   }
-
-  // 当前展开的任务 id：慢响应回来时据此丢弃过期结果（2026-11-04）。原来先点 A 再点 B，
-  // A 的日志晚到就会显示在 B 的标题下 —— 排查「为什么重启失败」时读到的是另一条任务的输出。
-  const logsFor = useRef<string | null>(null)
 
   async function toggleLogs(task: OperationTask) {
     // 2026-11-06：任务日志是 root 命令输出，后端现在只对管理员 / 运维开放；只读账号点开只会拿 403，
@@ -161,11 +181,11 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
     setLogsLoading(true)
     try {
       const rows = await api.taskLogs(task.id)
-      if (logsFor.current === task.id) setLogs(rows)
+      if (mountedRef.current && logsFor.current === task.id) setLogs(rows ?? [])
     } catch (err) {
-      if (logsFor.current === task.id) setLogError(err instanceof Error ? err.message : '日志读取失败')
+      if (mountedRef.current && logsFor.current === task.id) setLogError(err instanceof Error ? err.message : '日志读取失败')
     } finally {
-      if (logsFor.current === task.id) setLogsLoading(false)
+      if (mountedRef.current && logsFor.current === task.id) setLogsLoading(false)
     }
   }
 
@@ -225,7 +245,11 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
                   <td><span className="traffic-sub">{task.duration_ms ? `${(task.duration_ms / 1000).toFixed(1)}s` : '—'}</span></td>
                   <td><span className="traffic-sub">{task.result_summary || task.error_code || '点击查看日志'}</span></td>
                   <td><div className="row-actions">
-                    {task.status === 'queued' && <button className="row-more" aria-label={`取消任务 ${task.id.slice(0, 8)}`} disabled={viewer || cancelingId === task.id} title={viewer ? VIEWER_HINT : '取消排队中的任务'} onClick={(event) => { event.stopPropagation(); void cancel(task) }}><Ban size={15} /></button>}
+                    {task.status === 'queued' && (() => {
+                      const isWrite = WRITE_OPS.has(task.operation_type)
+                      const cancelBlocked = viewer || (isWrite && !admin)
+                      return <button className="row-more" aria-label={`取消任务 ${task.id.slice(0, 8)}`} disabled={cancelBlocked || cancelingId === task.id} title={viewer ? VIEWER_HINT : isWrite && !admin ? ADMIN_ONLY_HINT : '取消排队中的任务'} onClick={(event) => { event.stopPropagation(); void cancel(task) }}><Ban size={15} /></button>
+                    })()}
                     {(task.status === 'failed' || task.status === 'success' || task.status === 'cancelled') && RETRYABLE_OPS.has(task.operation_type) && (() => {
                       const isWrite = WRITE_OPS.has(task.operation_type)
                       const retryBlocked = viewer || (isWrite && !admin)
@@ -246,7 +270,7 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
             {logsLoading && <p className="task-log-summary">日志读取中…</p>}
             {!logsLoading && !logError && logs.length === 0 && <p className="task-log-summary">该任务没有日志记录。</p>}
             <ul className="task-log-list">
-              {logs.map((entry) => <li key={entry.sequence} className={`log-${entry.level}`}><span>{new Date(entry.logged_at).toLocaleTimeString('zh-CN', { hour12: false })}</span><code>{entry.message}</code></li>)}
+              {logs.map((entry) => <li key={entry.sequence} className={`log-${entry.level}`}><span>{formatLogClock(entry.logged_at)}</span><code>{entry.message}</code></li>)}
             </ul>
           </div>
         )}
@@ -263,7 +287,7 @@ export function TasksPage({ tasks, servers, onChanged, notify }: {
       {pendingRetry && (
         <Modal title="重新下发任务" kicker="RETRY TASK" onClose={() => setPendingRetry(null)}>
           <p className="form-note">将以相同参数重新入队 <strong>{operationLabel(pendingRetry.operation_type)}</strong>（主机 {pendingRetry.server_name}，原任务 {pendingRetry.id.slice(0, 8)}）。{WRITE_OPS.has(pendingRetry.operation_type) ? '这是写操作：目标主机需已开启写操作，且 unit 在其白名单内，否则会直接失败。' : '这是只读操作，不会改动目标主机上的服务。'}</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={() => setPendingRetry(null)}>取消</button><button className="button button-primary" onClick={confirmRetry}>确认重新下发</button></div>
+          <div className="modal-actions"><button className="button button-quiet" onClick={() => setPendingRetry(null)}>取消</button><button className="button button-primary" disabled={retrying} onClick={confirmRetry}>{retrying ? '提交中…' : '确认重新下发'}</button></div>
         </Modal>
       )}
     </>

@@ -20,7 +20,14 @@ import (
 	"time"
 )
 
-const apiBase = "https://api.cloudflare.com/client/v4"
+const (
+	apiBase = "https://api.cloudflare.com/client/v4"
+	// maxDNSRecordPages 给 DNS 记录分页设置硬上限，防止异常响应导致无限分页死循环。
+	maxDNSRecordPages = 100
+)
+
+// defaultHTTPClient 在未注入自定义客户端时复用默认传输层连接池，避免每次请求新建客户端对象。
+var defaultHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 type Client struct {
 	Token string
@@ -35,15 +42,19 @@ type envelope struct {
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
-	if strings.TrimSpace(c.Token) == "" {
+	token := strings.TrimSpace(c.Token)
+	if token == "" {
 		return nil, errors.New("未配置 Cloudflare API Token")
 	}
 	var rd io.Reader
 	if body != nil {
-		raw, _ := json.Marshal(body)
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("编码 Cloudflare 请求体失败：%w", err)
+		}
 		rd = bytes.NewReader(raw)
 	}
-	base := c.Base
+	base := strings.TrimRight(strings.TrimSpace(c.Base), "/")
 	if base == "" {
 		base = apiBase
 	}
@@ -51,14 +62,17 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 15 * time.Second}
+		hc = defaultHTTPClient
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("连接 Cloudflare 失败：%w", ctxErr)
+		}
 		return nil, errors.New("连接 Cloudflare 失败")
 	}
 	defer resp.Body.Close()
@@ -69,10 +83,15 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 	if !env.Success {
 		msgs := make([]string, 0, len(env.Errors))
 		for _, e := range env.Errors {
-			msgs = append(msgs, e.Message)
+			if msg := strings.TrimSpace(e.Message); msg != "" {
+				msgs = append(msgs, msg)
+			}
 		}
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			return nil, fmt.Errorf("Cloudflare 拒绝访问（%d）：Token 无效或缺少 Zone.DNS 编辑权限", resp.StatusCode)
+		}
+		if len(msgs) == 0 {
+			return nil, fmt.Errorf("Cloudflare 报错（HTTP %d）", resp.StatusCode)
 		}
 		return nil, fmt.Errorf("Cloudflare 报错：%s", strings.Join(msgs, "；"))
 	}
@@ -81,15 +100,21 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 
 // FindZone 从域名逐级向上找所属的 zone（a.b.example.com → b.example.com → example.com）。
 func (c *Client) FindZone(ctx context.Context, domain string) (id, name string, err error) {
-	labels := strings.Split(strings.Trim(strings.ToLower(domain), "."), ".")
+	normalized := strings.Trim(strings.ToLower(strings.TrimSpace(domain)), ".")
+	labels := strings.Split(normalized, ".")
 	for i := 0; i+1 < len(labels); i++ {
+		if labels[i] == "" {
+			continue
+		}
 		candidate := strings.Join(labels[i:], ".")
 		res, err := c.do(ctx, http.MethodGet, "/zones?name="+url.QueryEscape(candidate), nil)
 		if err != nil {
 			return "", "", err
 		}
 		var zones []struct{ ID, Name string }
-		_ = json.Unmarshal(res, &zones)
+		if err := json.Unmarshal(res, &zones); err != nil {
+			return "", "", fmt.Errorf("Cloudflare 域名列表无法解析：%w", err)
+		}
 		if len(zones) > 0 {
 			return zones[0].ID, zones[0].Name, nil
 		}
@@ -127,14 +152,22 @@ func (r UpsertResult) Warning() string {
 // （原来只改第一条，剩下的旧 IP 仍会被轮询返回）。AAAA 记录不动，但在结果里报出来。
 func (c *Client) UpsertARecords(ctx context.Context, domain, ip string) (UpsertResult, error) {
 	var out UpsertResult
+	domain = strings.TrimSuffix(strings.TrimSpace(domain), ".")
+	if domain == "" {
+		return out, errors.New("域名不能为空")
+	}
+	ip = strings.TrimSpace(ip)
 	parsed := net.ParseIP(ip)
 	if parsed == nil || parsed.To4() == nil {
 		return out, fmt.Errorf("%s 不是 IPv4 地址", ip)
 	}
+	// 归一化为标准点分十进制 IPv4，防止 IPv4 映射 IPv6（如 ::ffff:1.2.3.4）被原样发给 A 记录接口。
+	ip = parsed.To4().String()
 	zoneID, _, err := c.FindZone(ctx, domain)
 	if err != nil {
 		return out, err
 	}
+	escapedZone := url.PathEscape(zoneID)
 	records, err := c.listDNSRecords(ctx, zoneID, domain, "A")
 	if err != nil {
 		return out, err
@@ -142,7 +175,7 @@ func (c *Client) UpsertARecords(ctx context.Context, domain, ip string) (UpsertR
 	body := map[string]any{"type": "A", "name": domain, "content": ip, "ttl": 60, "proxied": false}
 	switch {
 	case len(records) == 0:
-		if _, err := c.do(ctx, http.MethodPost, "/zones/"+zoneID+"/dns_records", body); err != nil {
+		if _, err := c.do(ctx, http.MethodPost, "/zones/"+escapedZone+"/dns_records", body); err != nil {
 			return out, err
 		}
 		out.Action = "created"
@@ -152,13 +185,13 @@ func (c *Client) UpsertARecords(ctx context.Context, domain, ip string) (UpsertR
 		// 2026-11-04：PATCH 而不是 PUT。PUT 是整条替换：body 里没写的 comment / tags 会被清空，
 		// 每换一次 IP、每迁一次节点，运维在 Cloudflare 上给记录写的备注就丢一次。
 		patch := map[string]any{"content": ip, "ttl": 60, "proxied": false}
-		if _, err := c.do(ctx, http.MethodPatch, "/zones/"+zoneID+"/dns_records/"+records[0].ID, patch); err != nil {
+		if _, err := c.do(ctx, http.MethodPatch, "/zones/"+escapedZone+"/dns_records/"+url.PathEscape(records[0].ID), patch); err != nil {
 			return out, err
 		}
 		out.Action = "updated"
 	}
 	for _, extra := range records[min(1, len(records)):] {
-		if _, err := c.do(ctx, http.MethodDelete, "/zones/"+zoneID+"/dns_records/"+extra.ID, nil); err != nil {
+		if _, err := c.do(ctx, http.MethodDelete, "/zones/"+escapedZone+"/dns_records/"+url.PathEscape(extra.ID), nil); err != nil {
 			return out, fmt.Errorf("已改写首条 A 记录，但删除多余 A 记录 %s 失败：%w", extra.Content, err)
 		}
 		out.Deleted++
@@ -184,8 +217,9 @@ type dnsRecord struct {
 
 func (c *Client) listDNSRecords(ctx context.Context, zoneID, domain, kind string) ([]dnsRecord, error) {
 	var records []dnsRecord
-	for page := 1; ; page++ {
-		res, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/zones/%s/dns_records?type=%s&per_page=100&page=%d&name=%s", zoneID, kind, page, url.QueryEscape(domain)), nil)
+	escapedZone := url.PathEscape(zoneID)
+	for page := 1; page <= maxDNSRecordPages; page++ {
+		res, err := c.do(ctx, http.MethodGet, fmt.Sprintf("/zones/%s/dns_records?type=%s&per_page=100&page=%d&name=%s", escapedZone, url.QueryEscape(kind), page, url.QueryEscape(domain)), nil)
 		if err != nil {
 			return nil, err
 		}
@@ -205,6 +239,7 @@ func (c *Client) listDNSRecords(ctx context.Context, zoneID, domain, kind string
 			return records, nil
 		}
 	}
+	return nil, fmt.Errorf("Cloudflare %s 记录分页超过上限（%d 页），已中止拉取", kind, maxDNSRecordPages)
 }
 
 // ListZones 列出 Token 能看到的、已激活的域名（zone），按名称排序。
@@ -217,7 +252,9 @@ func (c *Client) ListZones(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		var zones []struct{ Name string }
-		_ = json.Unmarshal(res, &zones)
+		if err := json.Unmarshal(res, &zones); err != nil {
+			return nil, fmt.Errorf("Cloudflare 域名列表无法解析：%w", err)
+		}
 		for _, z := range zones {
 			names = append(names, strings.ToLower(z.Name))
 		}

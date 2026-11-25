@@ -178,7 +178,9 @@ function formatLoss(pct: number | null | undefined): string {
 function formatTime(iso: string | null): string {
   if (!iso) return '—'
   const date = new Date(iso)
-  const diffMs = Date.now() - date.getTime()
+  const ts = date.getTime()
+  if (Number.isNaN(ts)) return '—'
+  const diffMs = Date.now() - ts
   const minutes = Math.floor(diffMs / 60000)
   if (minutes < 1) return '刚刚'
   if (minutes < 60) return `${minutes} 分钟前`
@@ -259,13 +261,17 @@ export function NodeMonitoringPage({ notify }: Props) {
   // 保存最新一份数据，供「等测速真跑完」的轮询判断用。load 里直接写入：
   // 原来只靠 useEffect 在提交后同步，waitForSpeedtest 在 await load() 之后立刻读，读到的常是上一份。
   const dataRef = useRef<NodeMonitoringResponse | null>(null)
+  // 离开页面后，测速等待循环与数据请求不能再写状态（2026-10-30）。
+  const mounted = useRef(true)
+  const waitTimers = useRef<Set<number>>(new Set())
   const load = useCallback(async (quiet = false) => {
     const seq = ++loadSeq.current
     if (!quiet) setLoading(true)
     let ok = false
     try {
-      const result = await api.nodeMonitoring()
-      if (seq !== loadSeq.current) return true
+      const raw = await api.nodeMonitoring()
+      if (!mounted.current || seq !== loadSeq.current) return true
+      const result: NodeMonitoringResponse = { ...raw, nodes: raw.nodes ?? [] }
       dataRef.current = result
       setData(result)
       setUpdatedAt(new Date())
@@ -277,23 +283,23 @@ export function NodeMonitoringPage({ notify }: Props) {
         return result.nodes.find((n) => n.node_id === current.node_id) ?? null
       })
     } catch (err) {
-      if (seq !== loadSeq.current) return false
+      if (!mounted.current || seq !== loadSeq.current) return false
       setError(err instanceof Error ? err.message : '读取节点监控数据失败')
     } finally {
-      if (seq === loadSeq.current) setLoading(false)
+      if (mounted.current && seq === loadSeq.current) setLoading(false)
     }
     return ok
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   // 定时刷新。30 秒是权衡：这个页面的数据来自后台周期采集（默认 30s）
   // 与测速（默认 15min），刷新得比采集更快没有意义。
   useEffect(() => {
     // 2026-11-06：标签页在后台时不轮询（与订阅中心等页面一致），回到前台立即补一次。
     // 原来后台也每 30 秒拉一次整份监控数据（全部节点 + 三网测速汇总），开着不看的标签页一直在压数据库。
-    const timer = window.setInterval(() => { if (!document.hidden) load(true) }, 30_000)
-    const onVisible = () => { if (!document.hidden) load(true) }
+    const timer = window.setInterval(() => { if (!document.hidden) void load(true) }, 30_000)
+    const onVisible = () => { if (!document.hidden) void load(true) }
     document.addEventListener('visibilitychange', onVisible)
     return () => { window.clearInterval(timer); document.removeEventListener('visibilitychange', onVisible) }
   }, [load])
@@ -309,13 +315,27 @@ export function NodeMonitoringPage({ notify }: Props) {
       return next
     })
   }, [])
-  // 离开页面后，测速等待循环不能再发请求或写状态（2026-10-30）。
-  const mounted = useRef(true)
   useEffect(() => { dataRef.current = data }, [data])
-  useEffect(() => () => {
-    mounted.current = false
-    window.clearTimeout(reloadTimer.current)
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+      loadSeq.current += 1
+      window.clearTimeout(reloadTimer.current)
+      for (const id of waitTimers.current) window.clearTimeout(id)
+      waitTimers.current.clear()
+    }
   }, [])
+
+  function waitWithCancel(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      const id = window.setTimeout(() => {
+        waitTimers.current.delete(id)
+        resolve()
+      }, ms)
+      waitTimers.current.add(id)
+    })
+  }
 
   // 等这一台节点的测速**真的**产出新一轮结果（measured_at 变了），再撤掉忙碌态。
   //
@@ -326,7 +346,7 @@ export function NodeMonitoringPage({ notify }: Props) {
   // 现在最多等 3 分钟，按 measured_at 变化判定完成；超时也一定复位，不会永久转圈。
   async function waitForSpeedtest(node: MonitoringNode, before: string) {
     for (let i = 0; i < 9; i += 1) {
-      await new Promise((resolve) => window.setTimeout(resolve, 20_000))
+      await waitWithCancel(20_000)
       if (!mounted.current) return
       await load(true)
       if (!mounted.current) return
@@ -342,11 +362,13 @@ export function NodeMonitoringPage({ notify }: Props) {
       if (testingNodes.has(node.node_id)) return
       setNodeTesting(node.node_id, true)
     } else {
+      if (testing) return
       setTesting(true)
     }
     try {
       const before = dataRef.current?.nodes.find((n) => n.node_id === node?.node_id)?.speedtest?.measured_at ?? ''
       const result = await api.runSpeedtest(node?.node_id)
+      if (!mounted.current) return
       // 后端没有启动任何测速（无 SSH 凭据也没绑节点 API）时返回 200 + started=0：
       // 原来照样轮询 9×20 秒等一个不可能出现的结果，跳过原因也没显示（2026-11-03）。
       if (result.started === 0) {
@@ -358,11 +380,11 @@ export function NodeMonitoringPage({ notify }: Props) {
       notify(result.message)
       // 后台跑，所以隔一会儿自动刷新看结果；同时告诉用户在等。
       window.clearTimeout(reloadTimer.current)
-      reloadTimer.current = window.setTimeout(() => { load(true) }, 20_000)
+      reloadTimer.current = window.setTimeout(() => { if (mounted.current) void load(true) }, 20_000)
       if (node) {
         await waitForSpeedtest(node, before)
         if (mounted.current) setNodeTesting(node.node_id, false)
-      } else {
+      } else if (mounted.current) {
         setTesting(false)
       }
     } catch (err) {
@@ -942,7 +964,7 @@ function NodeDetailModal({ node, onClose }: { node: MonitoringNode; onClose: () 
                     卡片给平均、这里给逐靶点明细，两处对得上才不用来回猜。
                     不分组的话 18 条靶点平铺，用户得自己在脑子里归类。 */}
                 {CARRIER_ORDER.map((carrier) => {
-                  const list = summary.targets.filter((t) => t.carrier === carrier)
+                  const list = (summary.targets ?? []).filter((t) => t.carrier === carrier)
                   if (list.length === 0) return null
                   const agg = summary.by_carrier?.[carrier]
                   return (

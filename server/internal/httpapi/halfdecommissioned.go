@@ -173,6 +173,7 @@ func (s *Server) sweepHalfDecommissioned(ctx context.Context) (int, error) {
 	}
 
 	if cleaned > 0 {
+		InvalidateSubscriptionCache()
 		s.logger.Warn("半下线巡检: 发现并清理了指向已删节点的订阅映射",
 			"nodes", len(order), "entries", cleaned)
 		// 只在真的清理了映射时推送：半下线是删除节点后的残留，正常情况下极少出现，

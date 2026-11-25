@@ -25,6 +25,12 @@ export function MigrateNodeDialog({ nodes, servers, onClose, onDone, notify }: {
   const [error, setError] = useState('')
   const [job, setJob] = useState<InstallJob | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const emailOk = /^[^\s@'"`$\;&|<>]+@[^\s@'"`$\;&|<>]+\.[^\s@'"`$\;&|<>]+$/.test(email.trim())
 
   const node = nodes.find((n) => n.id === nodeId)
   const oldHost = servers.find((s) => s.id === node?.server_id)
@@ -48,7 +54,7 @@ export function MigrateNodeDialog({ nodes, servers, onClose, onDone, notify }: {
     notify(`迁移完成：${next.node_name}`)
     onDone()
   })
-  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight) }, [job?.log.length])
+  useEffect(() => { logRef.current?.scrollTo(0, logRef.current.scrollHeight) }, [(job?.log ?? []).length])
 
   async function start() {
     if (!node || !target) return
@@ -58,11 +64,11 @@ export function MigrateNodeDialog({ nodes, servers, onClose, onDone, notify }: {
     try {
       const { job_id } = await api.migrateNode(node.id, { target_server_id: target.id, auto_dns: autoDNS, email: email.trim() })
       saveAcmeEmail(email.trim())
-      setJob(pendingInstallJob(job_id, target.id))
+      if (mountedRef.current) setJob(pendingInstallJob(job_id, target.id))
     } catch (err) {
-      setError(err instanceof Error ? err.message : '启动迁移失败')
+      if (mountedRef.current) setError(err instanceof Error ? err.message : '启动迁移失败')
     } finally {
-      setStarting(false)
+      if (mountedRef.current) setStarting(false)
     }
   }
 
@@ -86,10 +92,16 @@ export function MigrateNodeDialog({ nodes, servers, onClose, onDone, notify }: {
           <label className="checkbox-row"><input type="checkbox" checked={autoDNS} onChange={(e) => setAutoDNS(e.target.checked)} /><span>用 Cloudflare 自动把域名改指新 IP（不勾则需你手工改 DNS，任务会等最多 10 分钟）</span></label>
           <label className="form-field"><span>证书通知邮箱 *（新主机申请证书必须）</span><input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="me@example.com" /></label>
           {node && target && <p className="form-note">{node.name}：{oldHost?.host} → <strong>{target.host}</strong>，域名 <code>{node.domain}</code></p>}
-          {error && <p role="alert" style={{ color: 'var(--red)' }}>{error}</p>}
+          {error && <p role="alert" style={{ color: 'var(--red)', overflowWrap: 'anywhere' }}>{error}</p>}
+          {error.includes('HY2_INSTALL_SCRIPT_URL') && (
+            <p className="form-note service-warn">
+              <AlertTriangle size={13} />
+              <span>当前服务端尚未配置节点安装脚本地址，请在服务端环境变量中设置可信的 <code>HY2_INSTALL_SCRIPT_URL=https://…</code> 并重启后端后再发起迁移。</span>
+            </p>
+          )}
           <div className="modal-actions">
             <button className="button button-quiet" onClick={onClose}>取消</button>
-            <button className="button button-primary" disabled={starting || !node || !target || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())} onClick={() => void start()}>{starting ? '启动中…' : '开始迁移'}</button>
+            <button className="button button-primary" disabled={starting || !node || !target || !emailOk} onClick={() => void start()}>{starting ? '启动中…' : '开始迁移'}</button>
           </div>
         </>}
         {job && <>
@@ -103,7 +115,7 @@ export function MigrateNodeDialog({ nodes, servers, onClose, onDone, notify }: {
           </div>
           {error && <p role="alert" style={{ color: 'var(--amber)' }}>{error}</p>}
           {job.error && <p role="alert" style={{ color: 'var(--red)', overflowWrap: 'anywhere' }}>{job.error}</p>}
-          <pre className="install-log" ref={logRef}>{job.log.join('\n') || '等待输出…'}</pre>
+          <pre className="install-log" ref={logRef}>{(job.log ?? []).join('\n') || '等待输出…'}</pre>
           <div className="modal-actions">
             {job.status === 'running' ? <span className="form-note">迁移在后台进行，关掉窗口不影响。</span> : <button className="button button-primary" onClick={onClose}>关闭</button>}
           </div>

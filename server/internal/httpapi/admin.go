@@ -34,18 +34,38 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 
 	nodeID := r.PathValue("id")
 	var prevInStore, hasNodeAPI, hasPortalBasic bool
-	var prevServerID string
+	var prevServerID, prevDomain string
 	var prevPort int
 	if err := s.db.QueryRow(r.Context(), `SELECT in_store,
        (COALESCE(api_url,'') <> '' AND api_key IS NOT NULL),
        (portal_basic_user IS NOT NULL AND portal_basic_password IS NOT NULL AND COALESCE(portal_path_token,'') <> ''),
-       COALESCE(server_id::text, ''), COALESCE(listen_port, 0)
-       FROM hysteria_nodes WHERE id=$1::uuid AND deleted_at IS NULL`, nodeID).Scan(&prevInStore, &hasNodeAPI, &hasPortalBasic, &prevServerID, &prevPort); err != nil {
+       COALESCE(server_id::text, ''), COALESCE(listen_port, 0), COALESCE(domain, '')
+       FROM hysteria_nodes WHERE id=$1::uuid AND deleted_at IS NULL`, nodeID).Scan(&prevInStore, &hasNodeAPI, &hasPortalBasic, &prevServerID, &prevPort, &prevDomain); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
 			return
 		}
 		s.databaseError(w, r, err)
+		return
+	}
+	// 仅允许管理员实质变更节点归属主机、监听端口、域名或商城上架状态（下架会触发批量注销买家账号）；
+	// 前端编辑表单保存时会回传原值，因此仅在字段值相对数据库原值发生变化时对非管理员拦截，避免误伤日常改名。
+	sensitiveChanged := false
+	if input.ServerID != nil && strings.TrimSpace(*input.ServerID) != "" && !strings.EqualFold(strings.TrimSpace(*input.ServerID), prevServerID) {
+		sensitiveChanged = true
+	}
+	if input.ListenPort != nil && *input.ListenPort != prevPort {
+		sensitiveChanged = true
+	}
+	if input.Domain != nil && strings.TrimSpace(*input.Domain) != strings.TrimSpace(prevDomain) {
+		sensitiveChanged = true
+	}
+	if input.InStore != nil && *input.InStore != prevInStore {
+		sensitiveChanged = true
+	}
+	if sensitiveChanged && claims.Role != "admin" {
+		s.auditDenied(r, "forbidden_admin_only")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "修改节点所属主机、端口、域名或商城上架状态需要管理员角色"})
 		return
 	}
 
@@ -263,6 +283,7 @@ func (s *Server) retryTask(w http.ResponseWriter, r *http.Request) {
 	// 重试这条入口漏了：operator 不能新建 kernel_reboot / uninstall_hy2，却能对着管理员跑过的那条点「重试」，
 	// 以 root 原样再跑一遍。只读任务（health_check / logs）的重试对 operator 照常可用。
 	if !readOnlyOperations[operation] && claims.Role != "admin" {
+		s.auditDenied(r, "forbidden_admin_only")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "重试写类主机任务（重启服务、系统预设等）仅限管理员；只读任务（健康检查、拉取日志）不受限制"})
 		return
 	}

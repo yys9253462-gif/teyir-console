@@ -316,7 +316,58 @@ func TestPortalDialerDialsValidatedIP(t *testing.T) {
 	if strings.Contains(body, "net.JoinHostPort(host, port)") {
 		t.Fatal("域名分支不能再按域名拨号：Dialer 会重新解析，校验形同虚设")
 	}
-	if !strings.Contains(body, "net.JoinHostPort(ips[0].IP.String(), port)") {
-		t.Fatal("必须连接已通过校验的解析结果")
+	if !strings.Contains(body, "portaltls.DialCheckedIPs(ctx, d, network, port, ips)") {
+		t.Fatal("必须通过 portaltls.DialCheckedIPs 连接已通过校验的解析结果并支持双栈回退")
+	}
+}
+
+// 验证 RunOnPortal 正确去除 baseURL 尾斜杠，且明确拒绝 3xx 重定向、401/403 鉴权失败与非 200 伪成功响应。
+func TestRunOnPortalHandlesTrailingSlashAndRejectsRedirectOrBadStatus(t *testing.T) {
+	oldDial := portalClient.Transport.(*http.Transport).DialContext
+	portalClient.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	}
+	defer func() { portalClient.Transport.(*http.Transport).DialContext = oldDial }()
+
+	p := newProberForTest()
+
+	// 1) baseURL 带末尾斜杠与空白时，不得拼出 //api/v1/speedtest。
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/speedtest" {
+			t.Errorf("带尾斜杠的 baseURL 拼出了错误路径: %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"results":[{"target_key":"dns-ali","target_name":"阿里","target_host":"223.5.5.5","carrier":"other","icmp_avg_ms":10,"icmp_loss_pct":0}]}`))
+	}))
+	defer okSrv.Close()
+	if rs, err := p.RunOnPortal(context.Background(), "n1", " "+okSrv.URL+"/ ", "fake-key"); err != nil || len(rs) != 1 {
+		t.Fatalf("带尾斜杠与空白的 baseURL 应成功归一并解析: len=%d err=%v", len(rs), err)
+	}
+
+	// 2) 302 重定向、401 鉴权失败、500 返回伪造 ok=true 都必须被拒绝。
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   string
+	}{
+		{"重定向", http.StatusFound, `{"ok":true,"results":[]}`, "重定向"},
+		{"鉴权失败", http.StatusUnauthorized, `{"ok":false}`, "鉴权失败"},
+		{"服务端500伪造ok", http.StatusInternalServerError, `{"ok":true,"results":[{"target_key":"a","icmp_avg_ms":1,"icmp_loss_pct":0}]}`, "异常状态码"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.status == http.StatusFound {
+					w.Header().Set("Location", "http://127.0.0.1/evil")
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			if _, err := p.RunOnPortal(context.Background(), "n1", srv.URL, "fake-key"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("%s 应报含 %q 的错误，实际: %v", tc.name, tc.want, err)
+			}
+		})
 	}
 }

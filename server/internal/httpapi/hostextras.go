@@ -158,8 +158,7 @@ type serverBilling struct {
 
 // GET /api/servers/billing
 func (s *Server) listServerBilling(w http.ResponseWriter, r *http.Request) {
-	// 2026-11-06：与其它读端点一致走读限流。这一条每条请求都会打外部 Cloudflare API，
-	// 循环拉取会耗尽 Token 配额，连带换 IP 时的 DNS 同步失败。
+	// 与其它读端点一致走读限流。
 	claims, _ := claimsFrom(r.Context())
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return
@@ -308,6 +307,9 @@ func (s *Server) changeServerIP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverID := r.PathValue("id")
+	if norm, ok := canonicalUUID(serverID); ok {
+		serverID = norm
+	}
 	if busy, err := s.serverHasActiveHostJob(r.Context(), serverID); err != nil {
 		s.databaseError(w, r, err)
 		return
@@ -435,6 +437,9 @@ func (s *Server) changeServerIP(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, r, err)
 		return
 	}
+	// 更换主机地址后立即作废健康闸门与订阅构建缓存，避免无域名节点或恢复中的节点继续下发旧地址。
+	invalidateHealthGateCache()
+	InvalidateSubscriptionCache()
 	// IP 纯净度与原生判定都跟 IP 绑定，换了 IP 就作废 —— 页面会显示「已变更，建议重测」。
 	s.audit(commitCtx, r, "change_server_ip", "server", serverID, map[string]any{"old_ip": oldIP, "new_ip": in.IP, "dns": results, "dns_ok": dnsOK})
 	status := http.StatusOK
@@ -447,6 +452,9 @@ func (s *Server) changeServerIP(w http.ResponseWriter, r *http.Request) {
 // serverHasActiveHostJob 判断主机是否被安装/迁移任务占用：内存里的任务表，
 // 或持久化的 host_operation_leases（跨进程、重启后仍有效）。
 func (s *Server) serverHasActiveHostJob(ctx context.Context, serverID string) (bool, error) {
+	if norm, ok := canonicalUUID(serverID); ok {
+		serverID = norm
+	}
 	installJobs.mu.Lock()
 	_, running := installJobs.byServer[serverID]
 	installJobs.mu.Unlock()
@@ -463,8 +471,7 @@ func (s *Server) serverHasActiveHostJob(ctx context.Context, serverID string) (b
 // GET /api/servers/{id}/metrics/trend?days=7
 // 按小时取均值，7 天最多 168 个点，前端画图不必再降采样。
 func (s *Server) serverMetricsTrend(w http.ResponseWriter, r *http.Request) {
-	// 2026-11-06：与其它读端点一致走读限流。这一条每条请求都会打外部 Cloudflare API，
-	// 循环拉取会耗尽 Token 配额，连带换 IP 时的 DNS 同步失败。
+	// 与其它读端点一致走读限流。
 	claims, _ := claimsFrom(r.Context())
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return

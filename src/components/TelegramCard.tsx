@@ -3,6 +3,12 @@ import { Bot, CheckCircle2, Circle, KeyRound, MessageSquare, Send } from 'lucide
 import { api, type PurityKeysState, type TelegramSettings } from '../lib/api'
 import { askConfirm } from './ConfirmHost'
 
+function formatClockTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('zh-CN', { hour12: false })
+}
+
 function ProgressStep({ done, children }: { done: boolean; children: ReactNode }) {
   return (
     <li className={done ? 'done' : ''}>{done ? <CheckCircle2 size={15} /> : <Circle size={15} />}<span>{children}</span></li>
@@ -27,15 +33,20 @@ export function TelegramCard({ notify }: { notify: (m: string) => void }) {
   // 已经在工作的机器人看起来像没配。
   const [loadError, setLoadError] = useState('')
   const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
   }, [])
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const [k, t] = await Promise.all([api.purityKeys(), api.telegramSettings()])
-      if (!mountedRef.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setKeys(k)
       setChat(t.chat_id)
       setSavedChat(t.chat_id)
@@ -43,7 +54,7 @@ export function TelegramCard({ notify }: { notify: (m: string) => void }) {
       setControlRoutes(t.control_routes ?? 0)
       setLoadError('')
     } catch (err) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       const message = err instanceof Error ? err.message : 'Telegram设置读取失败，请刷新重试'
       setLoadError(message)
       notify(message)
@@ -68,40 +79,46 @@ export function TelegramCard({ notify }: { notify: (m: string) => void }) {
   }, [tokenOK, savedChat])
 
   async function saveToken(value: string) {
+    if (busy) return
     setBusy(true)
     try {
-      setKeys(await api.setPurityKeys({ telegram: value }))
+      const nextKeys = await api.setPurityKeys({ telegram: value })
+      if (!mountedRef.current) return
+      setKeys(nextKeys)
       setTokenDraft('')
       notify(value ? 'Bot Token 已保存，机器人约 1 分钟内上线' : '已清除 Bot Token')
     } catch (err) {
-      notify(err instanceof Error ? err.message : '保存失败')
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '保存失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function saveChat() {
+    if (busy || (loadError && !keys)) return
     setBusy(true)
     try {
       const s = await api.setTelegramChat(chat.trim())
+      if (!mountedRef.current) return
       setSavedChat(s.chat_id)
       notify('Chat ID 已保存')
     } catch (err) {
-      notify(err instanceof Error ? err.message : '保存失败')
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '保存失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function test() {
+    if (busy) return
     setBusy(true)
     try {
       await api.testTelegram()
-      notify('测试消息已发送，去 Telegram 看一下')
+      if (mountedRef.current) notify('测试消息已发送，去 Telegram 看一下')
     } catch (err) {
-      notify(err instanceof Error ? err.message : '发送失败')
+      if (mountedRef.current) notify(err instanceof Error ? err.message : '发送失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -117,7 +134,7 @@ export function TelegramCard({ notify }: { notify: (m: string) => void }) {
           <div className="tg-botstatus">
             <span>菜单控制：{controlRoutes} 个管理接口 · 仅绑定私聊本人</span>
             <span>机器人：{bot.bot_username ? <strong>@{bot.bot_username}</strong> : '—'}</span>
-            <span>{bot.last_poll_ok ? <span className="lat-good">● 在线（{new Date(bot.last_poll_ok).toLocaleTimeString('zh-CN', { hour12: false })} 收过消息）</span> : <span className="lat-bad">● 尚未连上 Telegram</span>}</span>
+            <span>{bot.last_poll_ok ? <span className="lat-good">● 在线（{formatClockTime(bot.last_poll_ok)} 收过消息）</span> : <span className="lat-bad">● 尚未连上 Telegram</span>}</span>
             {bot.last_error && <span className="lat-bad" title={bot.last_error_at ?? ''}>最近错误：{bot.last_error}</span>}
             {bot.last_reply_err && <span className="lat-bad">回复失败：{bot.last_reply_err}</span>}
           </div>
@@ -155,15 +172,22 @@ export function TelegramCard({ notify }: { notify: (m: string) => void }) {
           <p className="form-note">{tokenOK ? <>给你的机器人发一句 <code>/start</code>，它会回复你的 Chat ID（约 1 分钟内）。想发到群里：把机器人拉进群，在群里发 <code>/start</code>，群的 Chat ID 以 <code>-</code> 开头。</> : '先完成上一步保存 Token，机器人上线后才能回复你的 Chat ID。'}</p>
           {bot?.last_from_chat && bot.last_from_chat !== savedChat && (
             <div className="tg-detected">
-              <span>刚收到来自 Chat ID <code>{bot.last_from_chat}</code> 的消息{bot.last_from_at ? `（${new Date(bot.last_from_at).toLocaleTimeString('zh-CN', { hour12: false })}）` : ''}</span>
+              <span>刚收到来自 Chat ID <code>{bot.last_from_chat}</code> 的消息{bot.last_from_at ? `（${formatClockTime(bot.last_from_at)}）` : ''}</span>
               <button className="button button-primary" disabled={busy} onClick={() => setChat(bot.last_from_chat)}>使用这个 Chat ID</button>
             </div>
           )}
           <label className="form-field"><span>Chat ID</span>
-            <input value={chat} onChange={(e) => setChat(e.target.value)} placeholder="123456789" />
+            <input value={chat} onChange={(e) => setChat(e.target.value)} placeholder="123456789" disabled={Boolean(loadError && !keys)} />
           </label>
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <button className="button button-primary" disabled={busy || chat.trim() === savedChat} onClick={() => void saveChat()}>保存 Chat ID</button>
+            <button
+              className="button button-primary"
+              disabled={busy || Boolean(loadError && !keys) || chat.trim() === savedChat}
+              title={loadError && !keys ? '配置读取失败，请先刷新页面以免误清空原有 Chat ID' : undefined}
+              onClick={() => void saveChat()}
+            >
+              保存 Chat ID
+            </button>
             <button className="button button-quiet" disabled={busy || !tokenOK || !chatOK} onClick={() => void test()}><Send size={15} />发送测试消息</button>
           </div>
         </div>

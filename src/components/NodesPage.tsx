@@ -145,9 +145,13 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
   const [capsError, setCapsError] = useState('')
   const [deleting, setDeleting] = useState(false)
   const mountedRef = useRef(true)
+  const capsSeq = useRef(0)
   useEffect(() => {
     mountedRef.current = true
-    return () => { mountedRef.current = false }
+    return () => {
+      mountedRef.current = false
+      capsSeq.current += 1
+    }
   }, [])
   const serverById = useMemo(() => new Map(servers.map((server) => [server.id, server])), [servers])
   const sortedNodes = useMemo(() => [...nodes].sort(byHealth), [nodes])
@@ -157,13 +161,14 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
   )
 
   const loadCapabilities = useCallback(async () => {
+    const seq = ++capsSeq.current
     try {
       const res = await api.nodeCapabilities()
-      if (!mountedRef.current) return
+      if (!mountedRef.current || seq !== capsSeq.current) return
       setCaps(new Map((res.nodes ?? []).map((c) => [c.node_id, c])))
       setCapsError('')
     } catch (err) {
-      if (!mountedRef.current) return
+      if (!mountedRef.current || seq !== capsSeq.current) return
       // ⚠️ 2026-10-30：失败时不能清空已有能力标签。
       // 上一轮成功拿到的 Map 是"最近一次已知能力"；把它清空会让每个节点
       // 都显示成"无协议/无扩展"，把一次瞬时网络失败谎报成"节点坏了"。
@@ -266,7 +271,7 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
           }
         } catch (err) {
           warnings.push(
-            `**分类没能保存**：${err instanceof Error ? err.message : '未知错误'}。` +
+            `分类没能保存：${err instanceof Error ? err.message : '未知错误'}。` +
             '商城的商品如果按分类圈定节点，当前仍是旧分类。',
           )
         }
@@ -291,7 +296,6 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
   const [decommissioned, setDecommissioned] = useState(false)
 
   async function confirmDelete() {
-    if (!pendingDelete) return
     if (!pendingDelete || deleting) return
     const target = pendingDelete
     const retired = decommissioned
@@ -374,17 +378,19 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
   // 「所属主机」下拉框已移除（2026-10-02）：它把 VPS 主机摆成了节点的必填前置，
   // 而实际接入路径是「接入节点」按公网 IP 自动匹配，用户不需要、也不该管这件事。
   // 节点跑在哪台机器仍以一行次要文字展示在列表里，溯源能力没丢。
-  const formFields = (label: string) => (
+  const formFields = (label: string) => {
+    const admin = isAdminSession()
+    return (
     <div style={{ display: 'grid', gap: 12 }}>
       <label className="form-field"><span>节点名称 *</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="hy2-tokyo-01" /></label>
       <div className="form-row">
-        <label className="form-field"><span>监听端口 *</span><input value={draft.listen_port} onChange={(event) => setDraft({ ...draft, listen_port: event.target.value })} inputMode="numeric" /></label>
+        <label className="form-field"><span>监听端口 *{!admin && <em className="field-optional">仅管理员可改</em>}</span><input value={draft.listen_port} disabled={!admin} title={admin ? undefined : '仅管理员可修改监听端口'} onChange={(event) => setDraft({ ...draft, listen_port: event.target.value })} inputMode="numeric" /></label>
         <label className="form-field"><span>版本</span><input value={draft.version} onChange={(event) => setDraft({ ...draft, version: event.target.value })} placeholder="2.6.1" /></label>
       </div>
-      <label className="form-field"><span>域名</span><input value={draft.domain} onChange={(event) => setDraft({ ...draft, domain: event.target.value })} placeholder="hy2.example.com" /></label>
-      <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, cursor: 'pointer' }}>
-        <input type="checkbox" checked={draft.in_store} onChange={(event) => setDraft({ ...draft, in_store: event.target.checked })} />
-        <span style={{ fontWeight: 600 }}>加入商城（推送给已购用户）</span>
+      <label className="form-field"><span>域名{!admin && <em className="field-optional">仅管理员可改</em>}</span><input value={draft.domain} disabled={!admin} title={admin ? undefined : '仅管理员可修改域名'} onChange={(event) => setDraft({ ...draft, domain: event.target.value })} placeholder="hy2.example.com" /></label>
+      <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, cursor: admin ? 'pointer' : 'not-allowed' }} title={admin ? undefined : '仅管理员可调整商城上架状态'}>
+        <input type="checkbox" checked={draft.in_store} disabled={!admin} onChange={(event) => setDraft({ ...draft, in_store: event.target.checked })} />
+        <span style={{ fontWeight: 600 }}>加入商城（推送给已购用户）{!admin && '（仅管理员可改）'}</span>
       </label>
       <p className="form-note" style={{ marginTop: -4 }}>
         {draft.in_store
@@ -408,7 +414,7 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
           <div className="cat-picker" style={{ marginTop: 4 }}>
             {categories.map((c) => (
               <label key={c.id} title={c.description || c.name}>
-                <input type="checkbox" checked={draftCategoryIDs.includes(c.id)} disabled={!isAdminSession()}
+                <input type="checkbox" checked={draftCategoryIDs.includes(c.id)} disabled={!admin}
                        onChange={(e) => setDraftCategoryIDs((prev) =>
                          e.target.checked ? [...prev, c.id] : prev.filter((x) => x !== c.id))} />
                 <span>{c.name}</span>
@@ -418,14 +424,15 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
           </div>
         )}
         <p className="form-note" style={{ marginTop: 4 }}>
-          {!isAdminSession() && '仅管理员可修改节点分类。'}商城商品选择某个分类后，买家只会拿到该分类下的节点。
+          {!admin && '仅管理员可修改节点分类。'}商城商品选择某个分类后，买家只会拿到该分类下的节点。
           不勾任何分类的节点<b>仍会</b>出现在「未按分类圈定」的订阅里。
         </p>
       </div>
 
       <p className="form-note">{label}</p>
     </div>
-  )
+    )
+  }
 
   return (
     <>
@@ -591,8 +598,8 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
                       <button className="row-more" aria-label={`读取 ${node.name} 的节点 API`} title={readOnly ? '只读账号不能刷新节点 API（这个读取会写回节点信息）' : `重新读取 portal（上次 ${(node.api_checked_at && new Date(node.api_checked_at).toLocaleTimeString('zh-CN', { hour12: false })) || '尚未'}）`} disabled={readOnly || !node.has_api || refreshing === node.id} onClick={() => refreshAPI(node)}><RefreshCw size={15} /></button>
                       <button className="row-more" aria-label={`探测 ${node.name}`} title={readOnly ? '只读账号不能下发探测任务' : !serverById.get(node.server_id)?.has_credential ? '探测经 SSH 在主机上执行健康检查：该主机没有 SSH 凭据（节点状态由采集器经节点 API 自动更新）' : '经 SSH 在主机上执行健康检查（结果在运维任务页）'} disabled={readOnly || probing === node.id || !serverById.get(node.server_id)?.has_credential} onClick={() => probe(node)}><Activity size={15} /></button>
                       <button className="row-more" aria-label={`设置 ${node.name} 的流量限额`} title={isAdminSession() ? '月度流量限额：超额自动停止节点服务' : '仅管理员可设置流量限额'} disabled={readOnly || !isAdminSession() || !node.has_api} onClick={() => openLimit(node)}><Gauge size={15} /></button>
-                      <button className="row-more" aria-label={`编辑 ${node.name}`} title="编辑节点" disabled={readOnly} onClick={() => openEdit(node)}><Pencil size={15} /></button>
-                      <button className="row-more" aria-label={`解绑 ${node.name} 的节点 API`} title={node.has_api ? '解绑节点侧 API' : '未接入节点 API，无需解绑'} disabled={!node.has_api || !isAdminSession() || unbinding === node.id} onClick={() => unbindAPI(node)}><Unplug size={15} /></button>
+                      <button className="row-more" aria-label={`编辑 ${node.name}`} title={readOnly ? '只读账号不能编辑节点' : '编辑节点'} disabled={readOnly} onClick={() => openEdit(node)}><Pencil size={15} /></button>
+                      <button className="row-more" aria-label={`解绑 ${node.name} 的节点 API`} title={!node.has_api ? '未接入节点 API，无需解绑' : !isAdminSession() ? '仅管理员可解绑节点侧 API' : '解绑节点侧 API'} disabled={!node.has_api || !isAdminSession() || unbinding === node.id} onClick={() => unbindAPI(node)}><Unplug size={15} /></button>
                       <button className="row-more" aria-label={`删除 ${node.name}`} title={isAdminSession() ? "删除节点" : "仅管理员可删除节点"} disabled={readOnly || !isAdminSession()} onClick={() => setPendingDelete(node)}><Trash2 size={15} /></button>
                     </div></td>
                   </tr>
@@ -611,7 +618,7 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
             <input type="checkbox" checked={decommissioned} disabled={deleting} onChange={(event) => setDecommissioned(event.target.checked)} style={{ marginTop: 3 }} />
             <span><strong>这台机器已永久停用</strong>（已关机或退租）。删除时连不上节点而没能注销的买家账号将直接结案，不再进入「节点回收」待补删。机器若还在运行请勿勾选 —— 那些账号仍可连接。</span>
           </label>
-          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => { setPendingDelete(null); setDecommissioned(false) }}>取消</button><button className="button button-primary" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
+          <div className="modal-actions"><button className="button button-quiet" disabled={deleting} onClick={() => { setPendingDelete(null); setDecommissioned(false) }}>取消</button><button className="button button-danger" disabled={deleting} onClick={() => void confirmDelete()}>{deleting ? '删除中…' : '确认删除'}</button></div>
         </Modal>
       )}
 

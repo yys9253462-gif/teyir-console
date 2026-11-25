@@ -911,7 +911,12 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request) {
 	}
 	endpointChanged := false
 	if input.Host != nil && strings.TrimSpace(*input.Host) != "" {
-		add("host", strings.TrimSpace(*input.Host))
+		host := strings.TrimSpace(*input.Host)
+		if strings.ContainsAny(host, " \t\r\n/") || controlChars.MatchString(host) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机地址包含非法字符"})
+			return
+		}
+		add("host", host)
 		endpointChanged = true
 	}
 	if input.SSHPort != nil {
@@ -923,7 +928,12 @@ func (s *Server) updateServer(w http.ResponseWriter, r *http.Request) {
 		endpointChanged = true
 	}
 	if input.SSHUser != nil && strings.TrimSpace(*input.SSHUser) != "" {
-		add("ssh_user", strings.TrimSpace(*input.SSHUser))
+		sshUser := strings.TrimSpace(*input.SSHUser)
+		if strings.ContainsAny(sshUser, " \t\r\n") || controlChars.MatchString(sshUser) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "SSH 用户名包含非法字符"})
+			return
+		}
+		add("ssh_user", sshUser)
 		endpointChanged = true
 	}
 	if input.TrafficURL != nil || input.TrafficFile != nil {
@@ -1319,6 +1329,26 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := r.PathValue("id")
+	// 与创建、重试任务保持同一权限边界：写类任务仅允许管理员取消，避免运维角色越权中断管理员排队的变更任务。
+	var operation, status string
+	err := s.db.QueryRow(r.Context(), `SELECT operation_type, status FROM operation_tasks WHERE id=$1::uuid`, taskID).Scan(&operation, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "只有排队中的任务可以取消"})
+		return
+	}
+	if err != nil {
+		s.databaseError(w, r, err)
+		return
+	}
+	if !readOnlyOperations[operation] && claims.Role != "admin" {
+		s.auditDenied(r, "forbidden_admin_only")
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "取消写类主机任务（重启服务、系统预设等）仅限管理员；只读任务不受限制"})
+		return
+	}
+	if status != "queued" {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "只有排队中的任务可以取消"})
+		return
+	}
 	tag, err := s.db.Exec(r.Context(), `UPDATE operation_tasks SET status='cancelled', finished_at=now() WHERE id=$1::uuid AND status='queued'`, taskID)
 	if err != nil {
 		s.databaseError(w, r, err)
@@ -1328,7 +1358,7 @@ func (s *Server) cancelTask(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "只有排队中的任务可以取消"})
 		return
 	}
-	s.audit(r.Context(), r, "cancel_task", "operation_task", taskID, nil)
+	s.audit(r.Context(), r, "cancel_task", "operation_task", taskID, map[string]any{"operation_type": operation})
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 }
 

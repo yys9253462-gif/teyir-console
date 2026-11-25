@@ -388,9 +388,15 @@ func (s *Server) acceptServerFingerprint(w http.ResponseWriter, r *http.Request)
 		ExpectedOld string `json:"expected_old"`
 		New         string `json:"new"`
 	}
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&in); err != nil ||
-		!strings.HasPrefix(in.New, "SHA256:") || in.ExpectedOld == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10)).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "缺少新旧指纹"})
+		return
+	}
+	in.ExpectedOld = strings.TrimSpace(in.ExpectedOld)
+	in.New = strings.TrimSpace(in.New)
+	if in.ExpectedOld == "" || !strings.HasPrefix(in.New, "SHA256:") || len(in.New) <= len("SHA256:") ||
+		strings.ContainsAny(in.New, " \t\r\n") || controlChars.MatchString(in.New) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "新旧指纹格式不正确"})
 		return
 	}
 	id := r.PathValue("id")

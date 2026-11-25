@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CheckCircle2, RefreshCw, Wrench } from 'lucide-react'
 import { api, isAdminSession, type InstallJob } from '../lib/api'
 import { askConfirm } from './ConfirmHost'
@@ -22,12 +22,25 @@ export function HostJobHistory({ notify }: { notify: (message: string) => void }
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const allowed = isAdminSession()
+  const loadSeq = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
   const load = useCallback(async () => {
     if (!allowed) return
+    const seq = ++loadSeq.current
     try {
-      setJobs((await api.installJobs()).jobs)
+      const res = await api.installJobs()
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setJobs(res.jobs ?? [])
       setError('')
     } catch (e) {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setError(e instanceof Error ? e.message : '任务读取失败')
     }
   }, [allowed])
@@ -38,7 +51,12 @@ export function HostJobHistory({ notify }: { notify: (message: string) => void }
     const timer = window.setInterval(() => {
       if (!document.hidden) void load()
     }, 15000)
-    return () => window.clearInterval(timer)
+    const onVisible = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [allowed, load])
 
   if (!allowed) return null
@@ -53,7 +71,7 @@ export function HostJobHistory({ notify }: { notify: (message: string) => void }
     } catch (e) {
       notify(e instanceof Error ? e.message : '结案失败')
     } finally {
-      setBusy('')
+      if (mountedRef.current) setBusy('')
     }
   }
 
@@ -91,7 +109,7 @@ export function HostJobHistory({ notify }: { notify: (message: string) => void }
                 <tr key={j.id}>
                   <td>
                     <div className="host-cell">
-                      <div className={`host-icon ${jobStatusBadge[j.status]}`}><Wrench size={14} /></div>
+                      <div className={`host-icon ${jobStatusBadge[j.status] ?? 'warning'}`}><Wrench size={14} /></div>
                       <div>
                         <strong>{j.node_name || '主机操作'}</strong>
                         <span className="mono">{j.id}</span>
@@ -99,7 +117,7 @@ export function HostJobHistory({ notify }: { notify: (message: string) => void }
                     </div>
                   </td>
                   <td>
-                    <span className={`status-badge ${jobStatusBadge[j.status]}`}><i />{jobStatusLabel[j.status]}</span>
+                    <span className={`status-badge ${jobStatusBadge[j.status] ?? 'warning'}`}><i />{jobStatusLabel[j.status] ?? j.status}</span>
                     {j.step && <span className="traffic-sub">{j.step}</span>}
                   </td>
                   <td><span className="traffic-sub">{j.error || '—'}</span></td>

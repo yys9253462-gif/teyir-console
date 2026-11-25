@@ -29,11 +29,11 @@ const PAD_L = 40
 const PAD_B = 18
 
 function fmtMs(v: number | null) {
-  return v === null ? '—' : `${Math.round(v)} ms`
+  return v === null || !Number.isFinite(v) ? '—' : `${Math.round(v)} ms`
 }
 
 function fmtLoss(v: number | null) {
-  return v === null ? '—' : `${v < 10 ? v.toFixed(1) : Math.round(v)}%`
+  return v === null || !Number.isFinite(v) ? '—' : `${v < 10 ? v.toFixed(1) : Math.round(v)}%`
 }
 
 function axisLabel(t: number, range: ChinaQualityRange) {
@@ -42,7 +42,7 @@ function axisLabel(t: number, range: ChinaQualityRange) {
   return range === '24h' ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`
 }
 
-function LineChart({ series, pick, max, unit, range, from, to }: {
+function LineChart({ series, pick, max, unit, range, from, to, label }: {
   series: ChinaQualitySeries[]
   pick: (p: ChinaQualitySeries['points'][number]) => number | null
   max: number
@@ -50,12 +50,14 @@ function LineChart({ series, pick, max, unit, range, from, to }: {
   range: ChinaQualityRange
   from: number
   to: number
+  label: string
 }) {
+  const safeMax = max > 0 ? max : 1
   const x = (t: number) => PAD_L + ((t - from) / Math.max(to - from, 1)) * (W - PAD_L - 4)
-  const y = (v: number) => 4 + (1 - Math.min(v, max) / max) * (H - PAD_B - 4)
-  const ticks = [0, 0.5, 1].map((f) => f * max)
+  const y = (v: number) => 4 + (1 - Math.max(0, Math.min(v, safeMax)) / safeMax) * (H - PAD_B - 4)
+  const ticks = [0, 0.5, 1].map((f) => f * safeMax)
   return (
-    <svg className="cq-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img">
+    <svg className="cq-chart" viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" role="img" aria-label={label}>
       {ticks.map((v) => (
         <g key={v}>
           <line x1={PAD_L} x2={W} y1={y(v)} y2={y(v)} className="cq-grid" />
@@ -70,14 +72,19 @@ function LineChart({ series, pick, max, unit, range, from, to }: {
         // 「这段时间没测到」画成「这段时间一切平稳」。
         const segments: string[] = []
         let current = ''
-        for (const p of s.points) {
+        for (const p of s.points ?? []) {
+          const ts = Date.parse(p.t)
           const v = pick(p)
-          if (v === null) { if (current) segments.push(current); current = ''; continue }
-          current += `${current ? 'L' : 'M'}${x(Date.parse(p.t)).toFixed(1)},${y(v).toFixed(1)}`
+          if (!Number.isFinite(ts) || v === null || !Number.isFinite(v)) {
+            if (current) segments.push(current)
+            current = ''
+            continue
+          }
+          current += `${current ? 'L' : 'M'}${x(ts).toFixed(1)},${y(v).toFixed(1)}`
         }
         if (current) segments.push(current)
         return segments.map((d, i) => (
-          <path key={`${s.carrier}-${i}`} d={d} fill="none" stroke={COLORS[s.carrier]} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+          <path key={`${s.carrier}-${i}`} d={d} fill="none" stroke={COLORS[s.carrier] ?? 'var(--accent)'} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
         ))
       })}
     </svg>
@@ -101,13 +108,15 @@ export function ChinaQualityTrend({ nodeId }: { nodeId: string }) {
     return () => { cancelled = true }
   }, [nodeId, range])
 
+  const seriesList = data?.series ?? []
   const view = useMemo(() => {
     if (!data) return null
-    const all = data.series.flatMap((s) => s.points)
+    const all = (data.series ?? []).flatMap((s) => s.points ?? [])
     if (all.length === 0) return null
-    const times = all.map((p) => Date.parse(p.t))
-    const msValues = all.map((p) => p.avg_ms).filter((v): v is number => v !== null)
-    const lossValues = all.map((p) => p.loss_pct).filter((v): v is number => v !== null)
+    const times = all.map((p) => Date.parse(p.t)).filter((t) => Number.isFinite(t))
+    if (times.length === 0) return null
+    const msValues = all.map((p) => p.avg_ms).filter((v): v is number => v !== null && Number.isFinite(v))
+    const lossValues = all.map((p) => p.loss_pct).filter((v): v is number => v !== null && Number.isFinite(v))
     // 纵轴取整到好读的刻度；丢包至少给到 20%，否则 2% 的抖动会被放大成满屏起伏。
     const msMax = Math.max(100, Math.ceil(Math.max(...msValues, 0) / 100) * 100)
     const lossMax = Math.max(20, Math.ceil(Math.max(...lossValues, 0) / 10) * 10)
@@ -133,18 +142,18 @@ export function ChinaQualityTrend({ nodeId }: { nodeId: string }) {
       ) : (
         <div className={loading ? 'cq-body cq-loading' : 'cq-body'}>
           <div className="cq-summary">
-            {data.series.map((s) => (
+            {seriesList.map((s) => (
               <div key={s.carrier}>
-                <span><i style={{ background: COLORS[s.carrier] }} />{s.label}</span>
+                <span><i style={{ background: COLORS[s.carrier] ?? 'var(--accent)' }} />{s.label}</span>
                 <strong>{fmtMs(s.avg_ms)}</strong>
                 <small>P95 {fmtMs(s.p95_ms)} · 丢包 {fmtLoss(s.loss_pct)}</small>
               </div>
             ))}
           </div>
           <div className="cq-label">平均延迟</div>
-          <LineChart series={data.series} pick={(p) => p.avg_ms} max={view.msMax} unit="" range={range} from={view.from} to={view.to} />
+          <LineChart series={seriesList} pick={(p) => p.avg_ms} max={view.msMax} unit="" range={range} from={view.from} to={view.to} label="三网平均延迟趋势图" />
           <div className="cq-label">平均丢包</div>
-          <LineChart series={data.series} pick={(p) => p.loss_pct} max={view.lossMax} unit="%" range={range} from={view.from} to={view.to} />
+          <LineChart series={seriesList} pick={(p) => p.loss_pct} max={view.lossMax} unit="%" range={range} from={view.from} to={view.to} label="三网平均丢包趋势图" />
           <p className="form-note">
             每个点是该时段内该运营商全部靶点的平均。单个靶点偶尔全丢包属正常（禁 ping / 限速），
             持续丢包 ≥30% 超过 1 小时会进入告警并推送。

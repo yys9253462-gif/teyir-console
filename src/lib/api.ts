@@ -1176,11 +1176,19 @@ export function loadSession(): Session | null {
 }
 
 export function saveSession(session: Session) {
-  window.localStorage.setItem(TOKEN_KEY, JSON.stringify(session))
+  try {
+    window.localStorage.setItem(TOKEN_KEY, JSON.stringify(session))
+  } catch {
+    // 浏览器禁用本地存储时不中断登录流程
+  }
 }
 
 export function clearSession() {
-  window.localStorage.removeItem(TOKEN_KEY)
+  try {
+    window.localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    // 忽略存储受限环境异常
+  }
 }
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -1282,7 +1290,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     }
     throw error
   }
-  return response.json() as Promise<T>
+  if (response.status === 204) {
+    return undefined as T
+  }
+  const text = await response.text()
+  if (!text) return undefined as T
+  return JSON.parse(text) as T
 }
 
 // Subscription previews are returned as text in whichever format was asked for,
@@ -1357,11 +1370,13 @@ function establishTerminalCookie(): Promise<{ ready: boolean }> {
   })
 }
 
+const seg = encodeURIComponent
+
 export const api = {
-  hostContainers: (id: string, signal?: AbortSignal) => request<{ containers: HostContainer[] }>(`/api/servers/${encodeURIComponent(id)}/docker/containers`, { signal }),
-  hostCompose: (id: string, signal?: AbortSignal) => request<{ projects: HostComposeProject[] }>(`/api/servers/${encodeURIComponent(id)}/docker/compose`, { signal }),
-  hostFiles: (id: string, path: string, signal?: AbortSignal) => request<HostFileList>(`/api/servers/${encodeURIComponent(id)}/files?path=${encodeURIComponent(path)}`, { signal }),
-  hostFilePreview: (id: string, path: string, signal?: AbortSignal) => request<HostFilePreview>(`/api/servers/${encodeURIComponent(id)}/files/preview?path=${encodeURIComponent(path)}`, { signal }),
+  hostContainers: (id: string, signal?: AbortSignal) => request<{ containers: HostContainer[] }>(`/api/servers/${seg(id)}/docker/containers`, { signal }),
+  hostCompose: (id: string, signal?: AbortSignal) => request<{ projects: HostComposeProject[] }>(`/api/servers/${seg(id)}/docker/compose`, { signal }),
+  hostFiles: (id: string, path: string, signal?: AbortSignal) => request<HostFileList>(`/api/servers/${seg(id)}/files?path=${seg(path)}`, { signal }),
+  hostFilePreview: (id: string, path: string, signal?: AbortSignal) => request<HostFilePreview>(`/api/servers/${seg(id)}/files/preview?path=${seg(path)}`, { signal }),
   terminalCookie: establishTerminalCookie,
   health: () => request<Health>('/api/health'),
   // 登录页配置（公开）：Turnstile site key 为空 = 后端未启用人机验证。
@@ -1438,33 +1453,33 @@ export const api = {
       body: JSON.stringify(input),
     }),
   refreshNodeAPI: (id: string) =>
-    request<{ status: string; users_count: number; listen_port: number; domain: string; cert_type: string; hop_range: string }>(`/api/nodes/${id}/api`),
+    request<{ status: string; users_count: number; listen_port: number; domain: string; cert_type: string; hop_range: string }>(`/api/nodes/${seg(id)}/api`),
   bindNodeAPI: (id: string, input: { url?: string; api_key?: string; basic_user?: string; basic_password?: string; access_json?: string }) =>
-    request<{ status: string; users_count: number; listen_port: number; has_basic: boolean; caps: Record<string, unknown> }>(`/api/nodes/${id}/api`, {
+    request<{ status: string; users_count: number; listen_port: number; has_basic: boolean; caps: Record<string, unknown> }>(`/api/nodes/${seg(id)}/api`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     }),
   unbindNodeAPI: (id: string) =>
-    request<{ status: string }>(`/api/nodes/${id}/api`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ status: string }>(`/api/nodes/${seg(id)}/api`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   // Node-side control, all riding the stored Bearer api_key.
-  nodeOverview: (id: string) => request<NodeOverview>(`/api/nodes/${id}/overview`),
+  nodeOverview: (id: string) => request<NodeOverview>(`/api/nodes/${seg(id)}/overview`),
   // The web-session half. Requires the node to have Basic credentials bound;
   // when it does not, the server answers 400 with need_basic:true.
   portalUpdateStatus: (refresh = false) =>
     request<PortalUpdateStatus>(`/api/portal-update-status${refresh ? '?refresh=1' : ''}`),
   portalUpdateBatchHistory: () => request<Pick<PortalUpdateBatch, 'id' | 'status' | 'created_at' | 'updated_at'>[]>('/api/portal-update-batches'),
-  cancelPortalUpdateBatch: (id: string) => request<{ status: string; message: string }>(`/api/portal-update-batches/${encodeURIComponent(id)}/cancel`, {
+  cancelPortalUpdateBatch: (id: string) => request<{ status: string; message: string }>(`/api/portal-update-batches/${seg(id)}/cancel`, {
     method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' },
   }),
   startPortalUpdateBatch: (node_ids: string[]) => request<PortalUpdateBatch>('/api/portal-update-batches', {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Confirm-Dangerous': 'yes' },
     body: JSON.stringify({ node_ids }),
   }),
-  portalUpdateBatch: (id: string) => request<PortalUpdateBatch>(`/api/portal-update-batches/${encodeURIComponent(id)}`),
-  nodePortalStatus: (id: string) => request<PortalNodeStatus>(`/api/nodes/${id}/portal-status`),
+  portalUpdateBatch: (id: string) => request<PortalUpdateBatch>(`/api/portal-update-batches/${seg(id)}`),
+  nodePortalStatus: (id: string) => request<PortalNodeStatus>(`/api/nodes/${seg(id)}/portal-status`),
   nodePortalAction: (id: string, payload: PortalActionRequest, dangerous = false) =>
-    request<PortalActionResult>(`/api/nodes/${id}/portal-action`, {
+    request<PortalActionResult>(`/api/nodes/${seg(id)}/portal-action`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -1472,25 +1487,25 @@ export const api = {
       },
       body: JSON.stringify(payload),
     }),
-  nodeUsers: (id: string) => request<NodeUserList>(`/api/nodes/${id}/users`),
+  nodeUsers: (id: string) => request<NodeUserList>(`/api/nodes/${seg(id)}/users`),
   // IP 纯净度：读缓存（不联网）与显式检测分开。列表页只调 ipPurity（快），
   // 检测由用户点按钮触发 —— 否则刷一次页面就把第三方免费配额刷爆。
-  ipPurity: (id: string) => request<IPPurityState>(`/api/nodes/${id}/ip-purity`),
+  ipPurity: (id: string) => request<IPPurityState>(`/api/nodes/${seg(id)}/ip-purity`),
   // 全量快照：专用页面一次拉所有节点（只读库，不联网）。
   ipPurityList: () => request<IPPurityList>('/api/ip-purity'),
   // forceApi=1 → 深度检测：即使离线库已判出连接类型也走 API 拿评分/双ISP。
   refreshIPPurity: (id: string, forceApi = false) =>
-    request<{ status: string; purity: IPPurity }>(`/api/nodes/${id}/ip-purity/refresh${forceApi ? '?force_api=1' : ''}`, {
+    request<{ status: string; purity: IPPurity }>(`/api/nodes/${seg(id)}/ip-purity/refresh${forceApi ? '?force_api=1' : ''}`, {
       method: 'POST',
     }),
-  nodeOutbounds: (id: string) => request<NodeOutboundState>(`/api/nodes/${id}/outbounds`),
+  nodeOutbounds: (id: string) => request<NodeOutboundState>(`/api/nodes/${seg(id)}/outbounds`),
   nodeOutboundProbe: (id: string, name: string) =>
-    request<{ name: string; kind: string; ip: string }>(`/api/nodes/${id}/outbounds/probe?name=${encodeURIComponent(name)}`),
+    request<{ name: string; kind: string; ip: string }>(`/api/nodes/${seg(id)}/outbounds/probe?name=${seg(name)}`),
   myLogins: () => request<{ items: LoginRecord[]; ban_policy: string }>('/api/auth/logins'),
   // telegram_configured = null 表示没读到绑定状态（数据库暂时不可用），与「未配置」不是一回事。
   schedules: () => request<{ items: ScheduleItem[]; telegram_configured: boolean | null; telegram_error?: string }>('/api/schedules'),
   setSchedule: (key: string, enabled: boolean) => request<{ items: ScheduleItem[]; telegram_configured: boolean | null; telegram_error?: string }>('/api/schedules', { method: 'PUT', body: JSON.stringify({ key, enabled }) }),
-  runSchedule: (key: string) => request<{ status: string }>(`/api/schedules/${key}/run`, { method: 'POST' }),
+  runSchedule: (key: string) => request<{ status: string }>(`/api/schedules/${seg(key)}/run`, { method: 'POST' }),
   storeSignature: () => request<{ required: boolean }>('/api/settings/store-signature'),
   setStoreSignature: (required: boolean) => request<{ required: boolean }>('/api/settings/store-signature', { method: 'PUT', body: JSON.stringify({ required }) }),
   autoHide: () => request<AutoHideState>('/api/nodes/auto-hide'),
@@ -1499,33 +1514,33 @@ export const api = {
   setTelegramChat: (chatId: string) => request<{ token_configured: boolean; chat_id: string }>('/api/settings/telegram', { method: 'PUT', body: JSON.stringify({ chat_id: chatId }) }),
   testTelegram: () => request<{ status: string }>('/api/settings/telegram/test', { method: 'POST' }),
   acceptFingerprint: (serverId: string, expectedOld: string, next: string) =>
-    request<{ fingerprint: string }>(`/api/servers/${serverId}/fingerprint/accept`, { method: 'POST', body: JSON.stringify({ expected_old: expectedOld, new: next }) }),
+    request<{ fingerprint: string }>(`/api/servers/${seg(serverId)}/fingerprint/accept`, { method: 'POST', body: JSON.stringify({ expected_old: expectedOld, new: next }) }),
   profitReport: () => request<ProfitReport>('/api/reports/profit'),
   setSubscriptionRevenue: (id: string, monthly: number | null, currency: string) =>
-    request<unknown>(`/api/subscriptions/${id}/revenue`, { method: 'PUT', body: JSON.stringify({ revenue_monthly: monthly, revenue_currency: currency }) }),
+    request<unknown>(`/api/subscriptions/${seg(id)}/revenue`, { method: 'PUT', body: JSON.stringify({ revenue_monthly: monthly, revenue_currency: currency }) }),
   sharing: () => request<{ items: SharingItem[] }>('/api/subscriptions/sharing'),
   blockChecks: () => request<BlockChecks>('/api/block-checks'),
   runBlockChecks: () => request<{ checked: number }>('/api/block-checks/run', { method: 'POST' }),
   setCNProbe: (serverId: string) => request<unknown>('/api/settings/cn-probe', { method: 'PUT', body: JSON.stringify({ server_id: serverId }) }),
   migrateNode: (nodeId: string, payload: { target_server_id: string; auto_dns: boolean; email?: string }) =>
-    request<{ job_id: string }>(`/api/nodes/${nodeId}/migrate`, { method: 'POST', body: JSON.stringify(payload) }),
-  testServerSSH: (id: string) => request<SSHTestResult>(`/api/servers/${id}/test-ssh`, { method: 'POST' }),
+    request<{ job_id: string }>(`/api/nodes/${seg(nodeId)}/migrate`, { method: 'POST', body: JSON.stringify(payload) }),
+  testServerSSH: (id: string) => request<SSHTestResult>(`/api/servers/${seg(id)}/test-ssh`, { method: 'POST' }),
   serverBilling: () => request<ServerBilling[]>('/api/servers/billing'),
   setServerBilling: (id: string, payload: Omit<ServerBilling, 'server_id'>) =>
-    request<ServerBilling>(`/api/servers/${id}/billing`, { method: 'PUT', body: JSON.stringify(payload) }),
+    request<ServerBilling>(`/api/servers/${seg(id)}/billing`, { method: 'PUT', body: JSON.stringify(payload) }),
   changeServerIP: (id: string, ip: string, updateDNS: boolean) =>
     request<{ old_ip: string; new_ip: string; dns_ok: boolean; dns: { node: string; domain: string; result: string; failed?: boolean; warning?: string }[] }>(
-      `/api/servers/${id}/change-ip`, { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' }, body: JSON.stringify({ ip, update_dns: updateDNS }) }),
-  serverTrend: (id: string, days: number) => request<{ days: number; points: ServerTrendPoint[] }>(`/api/servers/${id}/metrics/trend?days=${days}`),
+      `/api/servers/${seg(id)}/change-ip`, { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' }, body: JSON.stringify({ ip, update_dns: updateDNS }) }),
+  serverTrend: (id: string, days: number) => request<{ days: number; points: ServerTrendPoint[] }>(`/api/servers/${seg(id)}/metrics/trend?days=${days}`),
   installHy2: (serverId: string, payload: { domain: string; email?: string; port?: number; name?: string; in_store?: boolean; auto_dns?: boolean }) =>
-    request<{ job_id: string }>(`/api/servers/${serverId}/install-hy2`, { method: 'POST', body: JSON.stringify(payload) }),
+    request<{ job_id: string }>(`/api/servers/${seg(serverId)}/install-hy2`, { method: 'POST', body: JSON.stringify(payload) }),
   // 检测任意 IP / 域名的纯净度；命中本面板节点时顺带让该节点现场检测流媒体 / AI 解锁。
   probeIP: (query: string) => request<IPProbeResult>('/api/ip-probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query }) }),
   // Cloudflare Token 能管理的域名（一键安装只填前缀用）。没配 Token 时 configured=false。
   cloudflareZones: () => request<{ configured: boolean; zones: string[]; error?: string }>('/api/cloudflare/zones'),
   installJobs: () => request<{ jobs: InstallJob[] }>('/api/install-jobs'),
-  resolveInstallJob: (id: string) => request<{ status: string }>(`/api/install-jobs/${id}/resolve`, {method:'POST', headers:{'X-Confirm-Dangerous':'yes'}, body:JSON.stringify({confirm_remote_stopped:true})}),
-  installJob: (id: string) => request<InstallJob>(`/api/install-jobs/${id}`),
+  resolveInstallJob: (id: string) => request<{ status: string }>(`/api/install-jobs/${seg(id)}/resolve`, { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' }, body: JSON.stringify({ confirm_remote_stopped: true }) }),
+  installJob: (id: string) => request<InstallJob>(`/api/install-jobs/${seg(id)}`),
   deliveryDomain: () => request<DeliveryDomainState>('/api/settings/delivery-domain'),
   setDeliveryDomain: (value: string) => request<DeliveryDomainState>('/api/settings/delivery-domain', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value }) }),
   // 只改订阅显示名称（客户端导入后的分组名），不动交付域名。
@@ -1536,7 +1551,7 @@ export const api = {
     request<PurityKeysState>('/api/settings/purity-keys', { method: 'PUT', body: JSON.stringify(payload) }),
   unlockList: () => request<{ items: NodeUnlock[] }>('/api/unlock'),
   refreshUnlock: (id: string) =>
-    request<{ status: string; results: UnlockResult[] }>(`/api/nodes/${id}/unlock/refresh`, { method: 'POST' }),
+    request<{ status: string; results: UnlockResult[] }>(`/api/nodes/${seg(id)}/unlock/refresh`, { method: 'POST' }),
   refreshAllIPPurity: () => request<{ ok: number; skipped: number; failed: number; errors: string[] }>('/api/ip-purity/refresh-all', {
     method: 'POST',
   }),
@@ -1545,31 +1560,31 @@ export const api = {
   // （见后端 provisionAccountPassword）—— 否则每次 create 都会换掉节点上的密码，
   // 而库里记的旧值随即失效，客户端报 authentication error。
   createNodeUser: (id: string, payload: { user_id?: string; password?: string; duration_days?: number; ip_limit?: number; traffic_gb?: number; note?: string }) =>
-    request<NodeUserCreated>(`/api/nodes/${id}/users`, {
+    request<NodeUserCreated>(`/api/nodes/${seg(id)}/users`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   renewNodeUser: (id: string, uid: string, payload: { extend_days?: number; add_traffic_gb?: number }) =>
-    request<NodeUserRenewed>(`/api/nodes/${id}/users/${encodeURIComponent(uid)}/renew`, {
+    request<NodeUserRenewed>(`/api/nodes/${seg(id)}/users/${seg(uid)}/renew`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   deleteNodeUser: (id: string, uid: string) =>
-    request<{ status: string; user_id: string }>(`/api/nodes/${id}/users/${encodeURIComponent(uid)}`, {
+    request<{ status: string; user_id: string }>(`/api/nodes/${seg(id)}/users/${seg(uid)}`, {
       method: 'DELETE',
       headers: { 'X-Confirm-Dangerous': 'yes' },
     }),
-  nodeProxyServices: (id: string) => request<NodeProxyList>(`/api/nodes/${id}/proxy-services`),
+  nodeProxyServices: (id: string) => request<NodeProxyList>(`/api/nodes/${seg(id)}/proxy-services`),
   createNodeProxyService: (id: string, payload: { protocol: ProxyProtocol; port?: number; note?: string }) =>
-    request<NodeProxyService & { node_id: string }>(`/api/nodes/${id}/proxy-services`, {
+    request<NodeProxyService & { node_id: string }>(`/api/nodes/${seg(id)}/proxy-services`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   deleteNodeProxyService: (id: string, pid: string) =>
-    request<{ status: string; id: string }>(`/api/nodes/${id}/proxy-services/${encodeURIComponent(pid)}`, {
+    request<{ status: string; id: string }>(`/api/nodes/${seg(id)}/proxy-services/${seg(pid)}`, {
       method: 'DELETE',
       headers: { 'X-Confirm-Dangerous': 'yes' },
     }),
@@ -1653,15 +1668,15 @@ export const api = {
       node_state_failed?: Record<string, string>
       // 保存成功但操作者必须知道的提示（例如「续期了但订阅仍是停用」「已登记后台补开户」），没有时为空串。
       notice?: string
-    }>(`/api/subscriptions/${id}`, {
+    }>(`/api/subscriptions/${seg(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   deleteSubscriptionRecord: (id: string) =>
-    request<{ ok: boolean }>(`/api/subscriptions/${id}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ ok: boolean }>(`/api/subscriptions/${seg(id)}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   rotateSubscriptionRecord: (id: string) =>
-    request<{ token: string; subscription_url: string; delivery_url: string }>(`/api/subscriptions/${id}/rotate`, {
+    request<{ token: string; subscription_url: string; delivery_url: string }>(`/api/subscriptions/${seg(id)}/rotate`, {
       method: 'POST',
       headers: { 'X-Confirm-Dangerous': 'yes' },
     }),
@@ -1693,26 +1708,26 @@ export const api = {
     }
     return response.json() as Promise<DeliveryView>
   },
-  serverMetrics: (id: string) => request<MetricSample[]>(`/api/servers/${id}/metrics`),
+  serverMetrics: (id: string) => request<MetricSample[]>(`/api/servers/${seg(id)}/metrics`),
   // One call returns the 24h sparkline series for every host at once. The
   // dashboard used to fan out one request per host on every 15s poll.
   recentMetrics: () => request<Record<string, MetricSample[]>>('/api/metrics/recent'),
   uploadCredential: (id: string, authType: 'ssh_key' | 'password', secret: string) =>
-    request<CredentialMeta>(`/api/servers/${id}/credential`, {
+    request<CredentialMeta>(`/api/servers/${seg(id)}/credential`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ auth_type: authType, secret }),
     }),
-  credentialMeta: (id: string) => request<CredentialMeta[]>(`/api/servers/${id}/credential`),
+  credentialMeta: (id: string) => request<CredentialMeta[]>(`/api/servers/${seg(id)}/credential`),
   setWriteOps: (id: string, allow: boolean, units: string[]) =>
-    request<{ allow_write_ops: boolean; write_units: string[] }>(`/api/servers/${id}/write-ops`, {
+    request<{ allow_write_ops: boolean; write_units: string[] }>(`/api/servers/${seg(id)}/write-ops`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Confirm-Dangerous': 'yes' },
       body: JSON.stringify({ allow, units }),
     }),
-  taskLogs: (id: string) => request<TaskLog[]>(`/api/tasks/${id}/logs`),
+  taskLogs: (id: string) => request<TaskLog[]>(`/api/tasks/${seg(id)}/logs`),
   retryTask: (id: string, dangerous = false) =>
-    request<{ id: string; status: string }>(`/api/tasks/${id}/retry`, {
+    request<{ id: string; status: string }>(`/api/tasks/${seg(id)}/retry`, {
       method: 'POST',
       headers: dangerous ? { 'X-Confirm-Dangerous': 'yes' } : undefined,
     }),
@@ -1723,7 +1738,7 @@ export const api = {
   // 所以类型必须是联合而不是单一形状（原来的标注让这条判断在类型上"看起来对"、
   // 实际是拿节点本体去比一个不存在的字段）。
   updateNode: (id: string, payload: { name?: string; server_id?: string; listen_port?: number; version?: string; domain?: string; in_store?: boolean }) =>
-    request<Hy2Node | DeleteNodeResult>(`/api/nodes/${id}`, {
+    request<Hy2Node | DeleteNodeResult>(`/api/nodes/${seg(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -1741,21 +1756,21 @@ export const api = {
   retryOrphan: (id: string) =>
     // 后端回 detail（节点上本就没有这个账号）或 warning（删掉了但状态写回失败），从不回 message。
     request<{ status: string; user_id?: string; detail?: string; warning?: string }>(
-      `/api/orphans/${id}/retry`,
+      `/api/orphans/${seg(id)}/retry`,
       { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' } },
     ),
   // 不补删、直接结案（机器已永久停用时用）。仅管理员。
   // 节点月度流量限额。limitGB 为 null 表示不限额。仅管理员。
   setNodeTrafficLimit: (id: string, limitGB: number | null, resetDay: number) =>
-    request<{ status: string }>(`/api/nodes/${id}/traffic-limit`, {
+    request<{ status: string }>(`/api/nodes/${seg(id)}/traffic-limit`, {
       method: 'PUT', body: JSON.stringify({ limit_gb: limitGB, reset_day: resetDay }),
     }),
   // 2026-11-08：已删除节点的机器确认下线后，整台节点的待补删一次结案。
   resolveOrphansMachineOffline: (nodeId: string) =>
-    request<{ status: string; node_name: string; resolved: number }>(`/api/orphans/nodes/${nodeId}/resolve-machine-offline`, { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ status: string; node_name: string; resolved: number }>(`/api/orphans/nodes/${seg(nodeId)}/resolve-machine-offline`, { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   resolveOrphan: (id: string) =>
     request<{ status: string; user_id: string }>(
-      `/api/orphans/${id}/resolve`,
+      `/api/orphans/${seg(id)}/resolve`,
       { method: 'POST', headers: { 'X-Confirm-Dangerous': 'yes' } },
     ),
 
@@ -1763,7 +1778,7 @@ export const api = {
   // 把确定性密码重新下发到各节点，修「库里记的密码与节点上实际生效的不一致」。
   // 幂等且无副作用（密码是确定性推导的，重复下发不会换密码），可随便跑。
   reconcileSubscription: (id: string) =>
-    request<ReconcileResult>(`/api/subscriptions/${id}/reconcile`, { method: 'POST' }),
+    request<ReconcileResult>(`/api/subscriptions/${seg(id)}/reconcile`, { method: 'POST' }),
   reconcileAllSubscriptions: () =>
     request<ReconcileAllResult>('/api/subscriptions/reconcile-all', { method: 'POST' }),
 
@@ -1782,13 +1797,13 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   updateCategory: (id: string, payload: { slug?: string; name?: string; description?: string; sort_order?: number; enabled?: boolean }) =>
-    request<{ ok: boolean; categories: NodeCategory[] }>(`/api/categories/${id}`, {
+    request<{ ok: boolean; categories: NodeCategory[] }>(`/api/categories/${seg(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   deleteCategory: (id: string) =>
-    request<{ ok: boolean }>(`/api/categories/${id}`, {
+    request<{ ok: boolean }>(`/api/categories/${seg(id)}`, {
       method: 'DELETE',
       headers: { 'X-Confirm-Dangerous': 'yes' },
     }),
@@ -1797,41 +1812,41 @@ export const api = {
   // 分成 add/remove 会让"勾选后网络失败重试"变成不确定的结果。
   setNodeCategories: (nodeID: string, categoryIDs: string[]) =>
     // 移出分类时会回收那些分类订阅在本节点上的账号；回收不完整返回 207 + ok:false。
-    request<{ ok: boolean; category_ids: string[]; status?: string; error?: string; revoked_count?: number; failed_count?: number }>(`/api/nodes/${nodeID}/categories`, {
+    request<{ ok: boolean; category_ids: string[]; status?: string; error?: string; revoked_count?: number; failed_count?: number }>(`/api/nodes/${seg(nodeID)}/categories`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ category_ids: categoryIDs }),
     }),
   deleteCredential: (id: string) =>
-    request<{ status: string }>(`/api/servers/${id}/credential`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ status: string }>(`/api/servers/${seg(id)}/credential`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   updateUser: (id: string, role: UserAccount['role']) =>
-    request<{ status: string }>(`/api/users/${id}`, {
+    request<{ status: string }>(`/api/users/${seg(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ role }),
     }),
   resetUserPassword: (id: string, password: string) =>
-    request<{ status: string }>(`/api/users/${id}/password`, {
+    request<{ status: string }>(`/api/users/${seg(id)}/password`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password }),
     }),
   deleteUser: (id: string) =>
-    request<{ status: string }>(`/api/users/${id}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
-  serverDetail: (id: string) => request<Server>(`/api/servers/${id}`),
+    request<{ status: string }>(`/api/users/${seg(id)}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+  serverDetail: (id: string) => request<Server>(`/api/servers/${seg(id)}`),
   updateServer: (id: string, payload: { name?: string; region?: string; provider?: string; tags?: string[]; host?: string; ssh_port?: number; ssh_user?: string; reset_host_key?: boolean; traffic_api_url?: string; traffic_secret_file?: string }) =>
-    request<{ status: string }>(`/api/servers/${id}`, {
+    request<{ status: string }>(`/api/servers/${seg(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   deleteServer: (id: string) =>
-    request<{ status: string }>(`/api/servers/${id}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ status: string }>(`/api/servers/${seg(id)}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   // decommissioned：机器已永久停用。删除时没能注销的账号仍会登记，但直接结案，不进待补删。
   deleteNode: (id: string, decommissioned = false) =>
-    request<DeleteNodeResult>(`/api/nodes/${id}${decommissioned ? '?decommissioned=1' : ''}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
-  cancelTask: (id: string) => request<{ status: string }>(`/api/tasks/${id}/cancel`, { method: 'POST' }),
-  acknowledgeAlert: (id: string) => request<{ status: string }>(`/api/alerts/${id}/ack`, { method: 'POST' }),
+    request<DeleteNodeResult>(`/api/nodes/${seg(id)}${decommissioned ? '?decommissioned=1' : ''}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+  cancelTask: (id: string) => request<{ status: string }>(`/api/tasks/${seg(id)}/cancel`, { method: 'POST' }),
+  acknowledgeAlert: (id: string) => request<{ status: string }>(`/api/alerts/${seg(id)}/ack`, { method: 'POST' }),
   trafficHourly: () => request<TrafficBucket[]>('/api/traffic/hourly'),
   auditLogs: (limit = 50) => request<AuditEntry[]>(`/api/audit?limit=${limit}`),
   users: () => request<UserAccount[]>('/api/users'),
@@ -1850,6 +1865,9 @@ export const api = {
     })
     const session = loadSession()
     if (res.token && session) saveSession({ ...session, token: res.token })
+    // 同步推进终端认证代数并清理旧终端会话 Cookie，避免改密后复用已作废的终端凭证。
+    terminalAuthEpoch++
+    void queueTerminalCookie(clearTerminalCookie).catch(() => undefined)
     return res
   },
   runtime: () => request<RuntimeStatus>('/api/runtime'),
@@ -1869,28 +1887,28 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   xuiDeletePanel: (id: string) =>
-    request<{ status: string }>(`/api/xui/panels/${id}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
+    request<{ status: string }>(`/api/xui/panels/${seg(id)}`, { method: 'DELETE', headers: { 'X-Confirm-Dangerous': 'yes' } }),
   xuiRefreshPanel: (id: string) =>
-    request<{ status: string; inbounds_count: number; clients_count: number; online_count: number | null; onlines_error?: string }>(`/api/xui/panels/${id}/refresh`, { method: 'POST' }),
-  xuiInbounds: (id: string) => request<XuiInboundsResponse>(`/api/xui/panels/${id}/inbounds`),
+    request<{ status: string; inbounds_count: number; clients_count: number; online_count: number | null; onlines_error?: string }>(`/api/xui/panels/${seg(id)}/refresh`, { method: 'POST' }),
+  xuiInbounds: (id: string) => request<XuiInboundsResponse>(`/api/xui/panels/${seg(id)}/inbounds`),
   xuiAddClient: (id: string, payload: { inbound_id: number; email: string; limit_total_bytes: number; expire_days: number }) =>
-    request<{ status: string }>(`/api/xui/panels/${id}/clients`, {
+    request<{ status: string }>(`/api/xui/panels/${seg(id)}/clients`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }),
   xuiDeleteClient: (id: string, inboundID: number, clientID: string) =>
-    request<{ status: string }>(`/api/xui/panels/${id}/inbounds/${inboundID}/clients/${encodeURIComponent(clientID)}`, {
+    request<{ status: string }>(`/api/xui/panels/${seg(id)}/inbounds/${inboundID}/clients/${seg(clientID)}`, {
       method: 'DELETE',
       headers: { 'X-Confirm-Dangerous': 'yes' },
     }),
   xuiResetClientTraffic: (id: string, inboundID: number, email: string) =>
-    request<{ status: string }>(`/api/xui/panels/${id}/inbounds/${inboundID}/clients/${encodeURIComponent(email)}/reset`, {
+    request<{ status: string }>(`/api/xui/panels/${seg(id)}/inbounds/${inboundID}/clients/${seg(email)}/reset`, {
       method: 'POST',
     }),
-  tasks: (ids?: string[]) => request<OperationTask[]>(ids?.length ? `/api/tasks?ids=${ids.map(encodeURIComponent).join(',')}` : '/api/tasks'),
+  tasks: (ids?: string[]) => request<OperationTask[]>(ids?.length ? `/api/tasks?ids=${ids.map(seg).join(',')}` : '/api/tasks'),
   alerts: (includeResolved = false) => request<Alert[]>(`/api/alerts${includeResolved ? '?include=resolved' : ''}`),
-  alertEvents: (id: string) => request<AlertEvent[]>(`/api/alerts/${id}/events`),
+  alertEvents: (id: string) => request<AlertEvent[]>(`/api/alerts/${seg(id)}/events`),
   // 告警外发配置。
   //
   // ⚠️ 服务端只回 host，不回完整 URL —— webhook 地址里带 access_token，
@@ -1903,7 +1921,7 @@ export const api = {
   ),
   // Live systemd state for the host's whitelisted units. Unlike the write
   // operations this is answered synchronously and is safe to poll.
-  serverServices: (id: string) => request<ServiceStateResponse>(`/api/servers/${id}/services`),
+  serverServices: (id: string) => request<ServiceStateResponse>(`/api/servers/${seg(id)}/services`),
   createTask: (payload: { server_id: string; operation_type: ServiceOperation; node_id?: string; parameters?: Record<string, unknown> }) => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' }
     if (DANGEROUS_OPS.has(payload.operation_type)) {

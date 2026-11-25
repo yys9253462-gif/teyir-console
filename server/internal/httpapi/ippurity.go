@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -208,10 +209,9 @@ WHERE n.deleted_at IS NULL`)
 	ok, skipped, failed := 0, 0, 0
 	var errorsOut []string
 	for _, id := range ids {
-		// 2026-11-03：不再在外面再套一层 12 秒。checkAndStorePurity 内部已给上游查询
-		// purityCheckTimeout；外层同样 12 秒会让「上游 11 秒 + 落库 + RDAP 原生判定」
-		// 共用一份预算 ⇒ 配额已消耗、INSERT 却因 deadline 失败，is_native 也总被截断。
-		// 单节点刷新本来就直接用请求 ctx，批量与它保持一致。
+		if r.Context().Err() != nil {
+			break
+		}
 		row, err := s.checkAndStorePurity(r.Context(), id, false)
 		switch {
 		case err == nil && row.IP == "":
@@ -437,6 +437,8 @@ func (s *Server) checkAndStoreNative(ctx context.Context, nodeID, ip string) {
 	if regErr != nil {
 		s.logger.Warn("ip native: rdap lookup failed", "ip", ip, "error", regErr)
 	}
+	reg = strings.ToUpper(strings.TrimSpace(reg))
+	registry = strings.TrimSpace(registry)
 	geoCountry := ""
 	if s.geo != nil {
 		if info, err := s.geo.Lookup(callCtx, ip); err == nil {
@@ -467,6 +469,11 @@ WHERE node_id = $1::uuid`, nodeID, reg, registry, geoCountry); err != nil {
 // 不消耗 ipapi.is 配额。逐台串行、每台间隔 2 秒，对 RDAP 足够礼貌。
 func (s *Server) BackfillIPNative(ctx context.Context) {
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("ip native backfill panic", "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
 		rows, err := s.db.Query(ctx, `
 SELECT p.node_id::text, p.ip FROM node_ip_purity p
 JOIN hysteria_nodes n ON n.id = p.node_id AND n.deleted_at IS NULL

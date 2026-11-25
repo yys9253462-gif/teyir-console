@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sort"
 	"strconv"
@@ -211,7 +212,7 @@ LEFT JOIN LATERAL (
 WHERE s.id = $1::uuid AND s.deleted_at IS NULL`, id).
 		Scan(&host, &port, &user, &fingerprint, &writeUnits, &authType, &secret)
 	if err != nil {
-		if err == pgx.ErrNoRows {
+		if errors.Is(err, pgx.ErrNoRows) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在或已删除"})
 			return
 		}
@@ -251,6 +252,7 @@ WHERE s.id = $1::uuid AND s.deleted_at IS NULL`, id).
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "凭据解密失败"})
 		return
 	}
+	defer clear(plain)
 	if authType == "" {
 		authType = "ssh_key"
 	}

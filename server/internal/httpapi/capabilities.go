@@ -362,12 +362,18 @@ func (s *Server) nodeCapabilities(w http.ResponseWriter, r *http.Request) {
 // 请求共用同一次拉取；?refresh=1 跳过缓存。
 const nodeCapabilitiesTTL = 60 * time.Second
 
+type nodeCapsFlight struct {
+	done chan struct{}
+	res  nodeCapabilitiesResult
+	err  error
+}
+
 var nodeCapsCache struct {
 	sync.Mutex
 	result    nodeCapabilitiesResult
 	fetchedAt time.Time
 	gen       uint64
-	inflight  chan struct{}
+	inflight  *nodeCapsFlight
 	lastErr   error
 }
 
@@ -385,33 +391,29 @@ func (s *Server) cachedNodeCapabilities(ctx context.Context, force bool) (nodeCa
 	c := &nodeCapsCache
 	c.Lock()
 	if !force && !c.fetchedAt.IsZero() && time.Since(c.fetchedAt) < nodeCapabilitiesTTL {
-		// 2026-11-03：TTL 内只回缓存的成功结果。原来连 lastErr 一起回 ——
-		// 一次 ?refresh=1 撞上数据库抖动后，接下来最多 60 秒所有节点页加载都报 500，
-		// 而手里明明有有效的缓存。失败只回给发起（和等待）那次拉取的请求。
+		// TTL 内只回缓存的成功结果；失败只回给发起（和等待）那次拉取的请求。
 		res := c.result
 		c.Unlock()
 		return res, nil
 	}
-	if wait := c.inflight; wait != nil {
+	if flight := c.inflight; flight != nil {
 		c.Unlock()
 		select {
-		case <-wait:
-			c.Lock()
-			res, err := c.result, c.lastErr
-			c.Unlock()
-			return res, err
+		case <-flight.done:
+			res, fetchErr := flight.res, flight.err
+			return res, fetchErr
 		case <-ctx.Done():
 			return nodeCapabilitiesResult{}, ctx.Err()
 		}
 	}
-	done := make(chan struct{})
+	flight := &nodeCapsFlight{done: make(chan struct{})}
 	startGen := c.gen
-	c.inflight = done
+	c.inflight = flight
 	c.Unlock()
 
 	// 实际拉取放到独立协程并加 defer/recover：
 	// 1. 任何 panic 都会保证清空 inflight 并 close(done)，绝不永久死锁；
-	// 2. 发起者与跟随者统一在 select 里监听 ctx.Done()，调用方断开可立即释放请求协程。
+	// 2. 结果与错误绑定在本次 flight 实例上，防止缓存失效或下一次并发拉取篡改等待者读到的结果。
 	go func() {
 		var finalRes nodeCapabilitiesResult
 		var finalErr error
@@ -423,6 +425,8 @@ func (s *Server) cachedNodeCapabilities(ctx context.Context, force bool) (nodeCa
 				}
 				fetchErr = fmt.Errorf("读取节点能力时发生内部异常: %v", r)
 			}
+			flight.res = finalRes
+			flight.err = fetchErr
 			c.Lock()
 			if fetchErr == nil {
 				if c.gen == startGen {
@@ -432,9 +436,11 @@ func (s *Server) cachedNodeCapabilities(ctx context.Context, force bool) (nodeCa
 			} else {
 				c.lastErr = fetchErr
 			}
-			c.inflight = nil
+			if c.inflight == flight {
+				c.inflight = nil
+			}
 			c.Unlock()
-			close(done)
+			close(flight.done)
 		}()
 		// 用独立的超时上下文：发起者断开不应让共享这次拉取的其它请求一起失败。
 		fetchCtx, cancel := context.WithTimeout(context.Background(), capabilitiesTotalBudget())
@@ -444,10 +450,8 @@ func (s *Server) cachedNodeCapabilities(ctx context.Context, force bool) (nodeCa
 	}()
 
 	select {
-	case <-done:
-		c.Lock()
-		res, fetchErr := c.result, c.lastErr
-		c.Unlock()
+	case <-flight.done:
+		res, fetchErr := flight.res, flight.err
 		return res, fetchErr
 	case <-ctx.Done():
 		return nodeCapabilitiesResult{}, ctx.Err()

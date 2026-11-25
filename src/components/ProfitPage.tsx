@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, RefreshCw, ShieldCheck, TrendingDown, TrendingUp, Users } from 'lucide-react'
 import { api, isAdminSession, type ProfitReport, type SharingItem } from '../lib/api'
 import { formatBytes } from '../lib/format'
@@ -41,21 +41,34 @@ export function ProfitPage({ notify, readOnly }: { notify: (m: string) => void; 
   const [error, setError] = useState('')
   const [drafts, setDrafts] = useState<Record<string, { v: string; c: string }>>({})
   const [saving, setSaving] = useState('')
+  const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
 
   const load = useCallback(async () => {
     // 非管理员不必发这个请求：接口是 requireAdmin，发了只会拿一个 403（页面本身已显示说明）。
     if (!isAdminSession()) return
+    const seq = ++loadSeq.current
     try {
       let sharingErr = ''
       const [r, s] = await Promise.all([api.profitReport(), api.sharing().catch((err) => {
         sharingErr = err instanceof Error ? err.message : '读取失败'
         return null
       })])
-      setReport(r)
-      if (s) setSharing(s.items)
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setReport({ ...r, nodes: r.nodes ?? [], subscriptions: r.subscriptions ?? [] })
+      if (s) setSharing(s.items ?? [])
       setSharingError(sharingErr)
       setError('')
     } catch (err) {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setError(err instanceof Error ? err.message : '读取失败')
     }
   }, [])
@@ -63,20 +76,23 @@ export function ProfitPage({ notify, readOnly }: { notify: (m: string) => void; 
   useEffect(() => { void load() }, [load])
 
   async function saveRevenue(id: string) {
+    if (saving) return
     const d = drafts[id]
     if (!d) return
     const v = d.v.trim() === '' ? null : Number(d.v)
-    if (v !== null && (Number.isNaN(v) || v < 0)) { notify('月收入需为非负数'); return }
+    if (v !== null && (!Number.isFinite(v) || v < 0)) { notify('月收入需为有限非负数'); return }
     setSaving(id)
     try {
       await api.setSubscriptionRevenue(id, v, d.c)
+      if (!mountedRef.current) return
       setDrafts((m) => { const n = { ...m }; delete n[id]; return n })
       notify('月收入已保存')
       await load()
     } catch (err) {
+      if (!mountedRef.current) return
       notify(err instanceof Error ? err.message : '保存失败')
     } finally {
-      setSaving('')
+      if (mountedRef.current) setSaving('')
     }
   }
 
@@ -179,7 +195,7 @@ export function ProfitPage({ notify, readOnly }: { notify: (m: string) => void; 
               return (
                 <tr key={sub.id}>
                   <td><div className="host-cell"><div><strong>{sub.label || sub.order_id || sub.id.slice(0, 8)}</strong><span>{sub.order_id}</span></div></div></td>
-                  <td><span className="traffic-sub">{sub.expires_at ? new Date(sub.expires_at).toLocaleDateString('zh-CN') : '不过期'}</span></td>
+                  <td><span className="traffic-sub">{sub.expires_at ? (() => { const dt = new Date(sub.expires_at); return Number.isNaN(dt.getTime()) ? '—' : dt.toLocaleDateString('zh-CN') })() : '不过期'}</span></td>
                   <td>
                     <div className="revenue-input">
                       <input inputMode="decimal" value={d.v} disabled={readOnly} placeholder="未填写" aria-label="月收入"

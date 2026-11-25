@@ -1,15 +1,21 @@
 package httpapi
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // GET /api/servers/suggest-name?host=1.2.3.4 —— 添加主机时按地址自动命名。
 // 规则与节点一致：`国家-城市`（geo.Info.Name），与已有主机重名时追加序号。
 // 主机地址是域名时先解析出 IP 再识别。
 func (s *Server) suggestServerName(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceReadLimit(w, claims.Subject) {
+		return
+	}
 	host := strings.TrimSpace(r.URL.Query().Get("host"))
 	if host == "" || len(host) > 253 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "host required"})
@@ -17,7 +23,13 @@ func (s *Server) suggestServerName(w http.ResponseWriter, r *http.Request) {
 	}
 	ip := host
 	if net.ParseIP(host) == nil {
-		addrs, err := net.DefaultResolver.LookupHost(r.Context(), host)
+		if !installDomainPattern.MatchString(strings.ToLower(strings.TrimSuffix(host, "."))) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机地址不是有效的 IP 或域名"})
+			return
+		}
+		lookupCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		addrs, err := net.DefaultResolver.LookupHost(lookupCtx, host)
+		cancel()
 		if err != nil || len(addrs) == 0 {
 			writeJSON(w, http.StatusOK, map[string]string{"name": "", "error": "域名解析失败"})
 			return

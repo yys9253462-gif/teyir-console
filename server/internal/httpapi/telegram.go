@@ -403,7 +403,7 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 				text := strings.TrimSpace(u.Message.Text)
 				sender := strconv.FormatInt(u.Message.From.ID, 10)
 				cmd := tgCommand(text)
-				staleWrite := u.Message.Date > 0 && time.Now().Unix()-u.Message.Date > 300 && cmd == "/api" && !strings.Contains(strings.ToUpper(text), " GET ")
+				staleWrite := u.Message.Date > 0 && time.Now().Unix()-u.Message.Date > 300 && cmd == "/api" && !isTelegramReadOnlyAPI(text)
 				quick := cmd == "/menu" || cmd == "/start" || cmd == "/hide" || cmd == "/cancel" || cmd == "/status" || text == "🙈 收起菜单" || text == "🏠 主菜单"
 				dispatch(func() {
 					if staleWrite {

@@ -14,7 +14,7 @@ VPS 与 Hysteria2 节点运维控制台。Go API + PostgreSQL + React 前端，�
 ```
 
 - 前端：React 18 + TypeScript + Vite。
-- 后端：Go 1.23，标准库 `net/http`，`pgx/v5` 访问 PostgreSQL 16。
+- 后端：Go 1.26，标准库 `net/http`，`pgx/v5` 访问 PostgreSQL 16。
 - 采集与执行：`golang.org/x/crypto/ssh`，在目标主机上运行只读命令取指标、用 `ss -lun` 判定 HY2 端口监听、从节点侧统计文件读取累计用量。
 - 生产编排：`docker-compose.yml` 起 db / migrate / api / web 四个服务，其中 `web` 是 Caddy，负责托管前端并把 `/api` 转发给 `api`。前端**同源**访问 API，因此生产环境不涉及 CORS。
 
@@ -25,21 +25,25 @@ VPS 与 Hysteria2 节点运维控制台。Go API + PostgreSQL + React 前端，�
 | 变量 | 说明 |
 | --- | --- |
 | `POSTGRES_PASSWORD` | 数据库密码 |
-| `JWT_SECRET` | ≥32 字符，签发会话令牌 |
+| `JWT_SECRET` | ≥32 字符，签发会话令牌（可选 `JWT_TTL_MINUTES` 调整有效期，默认 720 分钟） |
 | `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` | 首次启动的种子管理员（密码 ≥12 字符） |
-| `CREDENTIAL_KEY` | base64(32 字节)，SSH 私钥的 AES-256-GCM 主密钥。**有凭据入库后不可更改** |
-| `ENABLE_COLLECTOR` | `true` 才启动周期采集，否则面板只有存量数据 |
-| `EXECUTOR_INTERVAL_SECONDS` | 任务执行器轮询间隔 |
-| `SITE_ADDRESS` | 留空监听 `:80`；填域名则自动申领 Let's Encrypt 证书并监听 `:443` |
+| `CREDENTIAL_KEY` | 标准 base64(32 字节)，SSH 私钥与节点密钥的 AES-256-GCM 主密钥。**有凭据入库后不可更改** |
+| `ENABLE_COLLECTOR` | `true` 才启动周期采集，否则面板只有存量数据（可选 `COLLECTOR_INTERVAL_SECONDS` 默认 30） |
+| `EXECUTOR_INTERVAL_SECONDS` | 任务执行器轮询间隔（默认 20 秒；另有 `SPEEDTEST_INTERVAL_MINUTES` 默认 15，设 0 禁用周期测速） |
+| `SITE_ADDRESS` | 留空（注释掉该行）监听 `:80`；填域名则自动申领 Let's Encrypt 证书并监听 `:443` |
 | `API_BIND` / `API_PORT` | API 映射到宿主机的地址与端口，默认 `127.0.0.1:8080` |
 | `WEB_BIND` / `WEB_PORT` / `WEB_TLS_PORT` | web 服务映射到宿主机的地址与端口（默认仅绑定 `127.0.0.1`，公网直出请显式设 `0.0.0.0`） |
 | `PANEL_PUBLIC_URL` | 可选，控制台外部访问地址（用于 Telegram 告警与菜单跳转按钮） |
-| `SUBSCRIPTION_PUBLIC_BASE_URL` | 可选，独立订阅/交付链接域名（留空则沿用面板访问域名） |
+| `SUBSCRIPTION_PUBLIC_BASE_URL` / `SUBSCRIPTION_BACKUP_BASE_URLS` | 可选，独立订阅/交付链接主域名与逗号分隔备用域名（留空则沿用面板访问域名） |
 | `SUBSCRIPTION_DEFAULT_NAME` | 可选，客户端导入后的默认订阅分组名（默认 `Teyir`，也可在系统设置页覆盖） |
 | `STORE_RENEW_BASE_URL` | 可选，外部商城续费基础地址（留空则交付页不展示外部续费跳转链接） |
+| `TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET` | 可选，Cloudflare Turnstile 登录人机验证（两项同时配置才启用） |
+| `LOGIN_SERVICE_KEY` / `LOGIN_SERVICE_EMAIL` | 可选，自动化登录豁免密钥（≥32 字符）与允许豁免的账号邮箱（留空默认仅限种子管理员） |
 | `BAN_WEBHOOK_URL` / `BAN_WEBHOOK_TOKEN` | 可选，宿主机封禁联动接口地址与令牌（供 Telegram 封禁管理调用） |
 | `HY2_INSTALL_SCRIPT_URL` / `HY2_INSTALLER_REPO` | 可选，一键安装节点脚本地址（HTTPS）与门户批量更新仓库（格式 `owner/repo`） |
-| `TRUSTED_PROXY_CIDRS` | 可选，可信反向代理网段清单（逗号分隔 CIDR，留空则仅采信直连对端 IP） |
+| `TRUSTED_PROXY_CIDRS` / `VIEWER_RESTRICT_SUBSCRIPTIONS` | 可选，可信反代网段（逗号分隔 CIDR）与是否限制只读角色查看订阅凭证（默认 `false`） |
+| `PORTAL_TLS_PINS` | 可选，自签节点门户证书 SHA256 指纹固定映射（JSON 对象） |
+| `GEO_*` / `IP_PURITY_*` | 可选，离线/在线地区归属与 IP 纯净度检测配置（含 `IP_PURITY_IPQS_KEY`，详见 `.env.example`） |
 
 ## 部署
 
@@ -47,21 +51,23 @@ VPS 与 Hysteria2 节点运维控制台。Go API + PostgreSQL + React 前端，�
 
 ```bash
 cp .env.example .env
-# 生成各类随机值
-sed -i "s|replace-with-a-long-random-value|$(openssl rand -base64 32)|" .env
-# ……其余必填项同理，或手工用编辑器填
+# 生成 URL 安全的数据库密码（避免含 + / = 破坏连接串解析）
+DB_PASS="$(openssl rand -base64 36 | tr '+/' '-_' | tr -d '=\n')"
+sed -i "s|replace-with-a-long-random-value|${DB_PASS}|" .env
+# ……其余必填项同理（注意 CREDENTIAL_KEY 须使用标准 openssl rand -base64 32），或手工用编辑器填
 
 docker compose up -d --build
 docker compose logs -f api          # 观察启动
 ```
 
-启动顺序由 `depends_on` 保证：`db` 健康 → `migrate` 迁移成功退出 → `api` 启动 → `web` 就绪。
-默认可以从 `http://<主机>:80` 打开面板。
+启动顺序由 `depends_on` 保证：`db` 健康 → `migrate` 迁移成功退出 → `api` 健康就绪 → `web` 启动。
+默认仅绑定 `127.0.0.1:80` 供外层反代转发；若需单机直接对外开放，请在 `.env` 中显式设置 `WEB_BIND=0.0.0.0` 后从 `http://<主机>:80` 打开面板。
 
 带域名自动 HTTPS：
 
 ```bash
 # .env 里设置
+WEB_BIND=0.0.0.0
 SITE_ADDRESS=panel.example.com
 ```
 
@@ -71,21 +77,21 @@ SITE_ADDRESS=panel.example.com
 `deploy/update.sh`，逻辑只有一份，不会随更新分叉）：
 
 ```bash
-./deploy.sh                 # 等价于 ./deploy.sh main
-./deploy.sh <tag-or-sha>    # 也可以钉到某个 tag / commit
-DEPLOY_NO_BACKUP=1 ./deploy.sh   # 跳过打包备份
+./deploy.sh                        # 沿用当前分支并拉取 origin 对应分支最新提交
+./deploy.sh <branch>               # 显式切换并更新到 origin 上存在的指定分支
+DEPLOY_NO_BACKUP=1 ./deploy.sh     # 跳过代码打包备份
+DEPLOY_NO_DB_BACKUP=1 ./deploy.sh  # 跳过迁移前数据库转储（慎用）
 ```
 
-它会依次做完：打包备份（保留最近 5 份）→ `git fetch` + `reset --hard` → **重建 `migrate`
+它会依次做完：打包备份（保留最近 5 份）→ `git fetch` + `reset --hard` → 等待 `db` 就绪并备份数据库 → **重建 `migrate`
 镜像** → 跑迁移 → 重建 api/web → 轮询 `/api/health` 直到 200；失败时直接把 api 最近 60
 行日志打到 stderr。
 
-⚠️ 不要图省事只跑 `docker compose up -d --build`。`migrate` 服务复用 api 的构建阶段，
-而迁移文件是**通过构建上下文**拷进镜像的；不先 `build migrate` 就 `run migrate`，跑的
-还是旧镜像里的旧迁移文件，表现是「迁移静默没生效，`schema_migrations` 数量不变」。
-这也是为什么 `deploy.sh` 要单独准备一个入口，而不是让人手敲 compose 命令。
+⚠️ 不要图省事只跑 `docker compose up -d --build`。`migrate` 服务使用独立的精简二进制阶段，
+每次发版先执行 `docker compose build migrate && docker compose run --rm migrate` 可确保迁移器代码与最新迁移文件同步生效，
+避免旧镜像静默跳过新增迁移或逻辑变更。这也是 `deploy.sh` 统一封装发布顺序的原因。
 
-健康检查端口从 `.env` 的 `API_PORT` 读（默认 8080）。曾经在脚本里写死过 18080，
+健康检查端口从 `.env` 的 `API_PORT` 读（默认 8080）。曾经在脚本里写死过旧测试端口，
 于是每次部署都以「健康检查超时」收场，而服务其实早就起来了——别再写死它。
 
 ### 方式二：宿主机直装（systemd）
@@ -93,14 +99,15 @@ DEPLOY_NO_BACKUP=1 ./deploy.sh   # 跳过打包备份
 不想用 Docker 时，把 Go 二进制和前端静态文件直接放宿主机：
 
 ```bash
-# 1) 构建
+# 1) 构建（同时编译 api 与 migrate，目标机无需安装 Go 环境）
 CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/api ./server/cmd/api
-npm ci && npm run build
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/migrate ./server/cmd/migrate
+npm ci --no-audit --no-fund && npm run build
 
 # 2) 安装
 sudo useradd --system --home /opt/hy2-ops-console --shell /usr/sbin/nologin nodeops
 sudo mkdir -p /opt/hy2-ops-console/bin /etc/hy2-ops-console /srv/hy2-ops-console
-sudo cp bin/api /opt/hy2-ops-console/bin/
+sudo cp bin/api bin/migrate /opt/hy2-ops-console/bin/
 sudo cp -r dist/* /srv/hy2-ops-console/
 sudo cp -r server/migrations /opt/hy2-ops-console/    # 迁移器需要
 sudo chown -R nodeops:nodeops /opt/hy2-ops-console
@@ -111,8 +118,8 @@ sudo editor /etc/hy2-ops-console/api.env              # 填真实值
 sudo install -m 644 deploy/hy2-ops-console-api.service /etc/systemd/system/
 
 # 4) 迁移 + 启动
-sudo -u nodeops env DATABASE_URL='...' MIGRATIONS_DIR=/opt/hy2-ops-console/server/migrations \
-  go run ./server/cmd/migrate
+sudo -u nodeops env DATABASE_URL='...' MIGRATIONS_DIR=/opt/hy2-ops-console/migrations \
+  /opt/hy2-ops-console/bin/migrate
 sudo systemctl daemon-reload && sudo systemctl enable --now hy2-ops-console-api
 journalctl -u hy2-ops-console-api -f
 ```
@@ -375,13 +382,13 @@ trafficStats:
 ## 地区 / VPS 商家自动识别
 
 新增 hy2 节点、或登记 3X-UI 面板时，控制台会按它的**公网 IP** 自动判断
-「在哪个地区、是哪家 VPS 商家」，并据此命名（如 `Tokyo-AWS`），
+「在哪个地区、是哪家 VPS 商家」，并据此命名（如 `日本-东京`，商家信息单独写入 `provider` 字段），
 免去每加一台机器都要自己回忆「这台是法兰克福的 Hetzner 还是赫尔辛基的」。
 
-三条行为约定（实现见 `server/internal/httpapi/geoapply.go`）：
+三条行为约定（实现见 `server/internal/httpapi/geoapply.go` 与 `server/internal/geo/geo.go`）：
 
-1. **命名格式是 `地区-商家`**；只识别出一边时就只用那一边，不会产出
-   `Tokyo-` 或 `-AWS` 这种带孤儿连字符的名字。
+1. **命名格式是 `国家-城市`**；只识别出一边时就只用那一边，不会产出
+   `日本-` 或 `-东京` 这种带孤儿连字符的名字。
 2. **已经手工填过的字段永远不覆盖。** 你打的 `HK-主力` 不会被识别结果冲掉。
    靠数据库里的 `name_source` / `region_source` / `provider_source`
    三个标记区分「自动填的（auto，可被更新）」与「人工填的（manual，永不覆盖）」。
@@ -440,7 +447,7 @@ docker compose restart api
 ## 部署相关边界
 
 - **迁移不与 API 启动耦合**：API 进程不自己跑迁移，迁移由独立的 `migrate` 服务/命令完成。这样做的好处是 API 可以多副本横向扩展而不会并发跑迁移，代价是升级时必须先跑迁移（compose 已用 `service_completed_successfully` 约束顺序）。
-- **`web` 服务默认把 80/443 映射到 `0.0.0.0`**：如果宿主机上已经有别的服务占用这两个端口（比如已有 Caddy），把 `WEB_BIND` 改成 `127.0.0.1` 并调高 `WEB_PORT`，再由外层反代转发进来。
+- **`web` 服务默认把 80/443 绑定到 `127.0.0.1`**：避免未配置证书时直接暴露明文管理面，也便于接入宿主机已有外层反代（如外层 Caddy 占用 80/443 时可顺手调高 `WEB_PORT`）。如需单机直接对外开放 80/443，请在 `.env` 中显式设置 `WEB_BIND=0.0.0.0`。
 - **`SITE_ADDRESS` 留空时不启 HTTPS**：这是刻意的——本地和内网部署通常没有公网可达的 80/443，强行申领证书只会失败刷日志。要 HTTPS 就填域名，并确保 ACME 校验可达。
 - **Caddy 会自动处理 HTTP→HTTPS 跳转与证书续期**：配了域名后不要再手工加跳转规则，否则容易和 Caddy 内建行为打架。
 - **API 默认只绑回环**：前端经 `web` 同源转发，正常部署无需把 API 暴露到公网。只有在前后端分离部署时才需要调整。

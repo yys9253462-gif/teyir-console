@@ -1,10 +1,10 @@
 [Unit]
-Description=hy2-ops-console API (node operations console)
+Description=teyir-console API (hy2-ops-console node operations service)
 Documentation=https://github.com/yys9253462-gif/teyir-console
 After=network-online.target postgresql.service
 Wants=network-online.target
 # 如果数据库跑在同机的 postgresql 服务上，把下面这行取消注释，
-# 让 systemd 等库起来了再拉 API，避免启动瞬间连不上直接退出。
+# 让 systemd 等库起来了再拉接口服务，避免启动瞬间连不上直接退出。
 # Requires=postgresql.service
 
 [Service]
@@ -14,7 +14,7 @@ Group=nodeops
 WorkingDirectory=/opt/hy2-ops-console
 
 # 环境变量放独立文件，权限 600，属主 nodeops。
-# 不要把这些值直接写进本文件——unit 文件通常全局可读。
+# 不要把这些值直接写进本文件——服务定义文件通常全局可读。
 EnvironmentFile=/etc/hy2-ops-console/api.env
 
 ExecStart=/opt/hy2-ops-console/bin/api
@@ -22,9 +22,10 @@ ExecStart=/opt/hy2-ops-console/bin/api
 Restart=on-failure
 RestartSec=5s
 
-# 优雅退出：main.go 收到 SIGTERM 后会停止收新请求并等 10 秒收尾
+# 优雅退出：main.go 收到 SIGTERM 后会停止收新请求（最长 10 秒）并等待执行器排空（最长 8 秒），
+# 预留 30 秒停机超时避免在途任务写回被强制中止。
 KillSignal=SIGTERM
-TimeoutStopSec=20s
+TimeoutStopSec=30s
 
 # ---- 安全加固 --------------------------------------------------------------
 # 这个进程需要的是：联网（SSH 到节点）、读配置、连数据库。除此之外都关掉。
@@ -45,10 +46,10 @@ MemoryDenyWriteExecute=true
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# 日志走 journald：journalctl -u hy2-ops-console -f
+# 日志走 journald：journalctl -u hy2-ops-console-api -f
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=hy2-ops-console
+SyslogIdentifier=hy2-ops-console-api
 
 [Install]
 WantedBy=multi-user.target

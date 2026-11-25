@@ -139,7 +139,9 @@ node tests/delivery-ui.cjs --base https://panel.example.com \
 | `days_left` 哨兵 | — | `1 小时`→`1`（向上取整）；`过期 5 秒`→`0`；**永久才是 `-1`**，三者互不混淆 |
 | 幂等重放 | — | 同 `order_id` 带 `ip_limit=1`/`duration_days=1` 重放，原单仍是 `1000`/`30 天` |
 
-宽限窗口（`now - 7d ± 2h`）的分界实测：
+> 说明：下表为早期 7 天宽限期版本的历史边界记录；现行版本宽限已调整为 `0`（到期即收回），详见下文「到期立即回收（宽限 = 0）」一节。
+
+宽限窗口（`now - 7d ± 2h`）的历史分界实测：
 
 | 时间点 | `auto_delete` | 视图 | 订阅源 | 库里 |
 |---|---|---|---|---|
@@ -192,14 +194,14 @@ python tests/buyer-delivery-e2e.py --base https://panel.example.com \
   --store-key "$KEY" --ssh-alias panel-host --json-out buyer-e2e.json
 ```
 
-⚠️ **`--base` 是给「本机」发请求用的，不是给 SE 用的。** 这个脚本的 HTTP 调用
+⚠️ **`--base` 是给「运行脚本的本机」发请求用的，不是给远端测试机用的。** 这个脚本的 HTTP 调用
 从运行它的那台机器直接发出，所以：
 
-- 在**本机（Windows）**跑 → `--base https://panel.example.com`（公网地址）。
-  填 `127.0.0.1:18080` 会全部 `got=0`，看起来像产品挂了，其实是打到自己机器上没人听。
-- 在 **SE 上**跑 → 才能用 `--base http://127.0.0.1:18080`。
+- 在**本机（Windows / 本地开发机）**跑 → `--base https://panel.example.com`（公网地址）。
+  填 `127.0.0.1:8080` 会全部 `got=0`，看起来像产品挂了，其实是打到自己机器上没人听。
+- 在**目标测试机本机**跑 → 才能用 `--base http://127.0.0.1:8080`。
 
-只有 `--ssh-alias` 相关的操作（造到期数据、查库核对）才走 SSH 进 SE。
+只有 `--ssh-alias` 相关的操作（造到期数据、查库核对）才走 SSH 进目标测试机。
 
 前五个脚本验证的是「系统的各个部件对不对」。这个脚本验证的是
 **运营方对买家作出的承诺有没有兑现** —— 不查接口能返回什么，
@@ -237,7 +239,7 @@ python tests/buyer-delivery-e2e.py --base https://panel.example.com \
 srv_now = ssh("SELECT EXTRACT(EPOCH FROM now())::bigint")
 ```
 
-不能用本机 `time.time()`。实测**本机比 SE 快约 9 秒**，于是用本机算的
+不能用本机 `time.time()`。实测本机与目标测试机时钟可能存在数秒偏差，于是用本机算的
 「5 秒前」传到服务器眼里还是「4 秒后到期」，下单响应会**正确地**回
 `expired=false`、并且照常下发订阅链接 —— 看起来像「到期不生效」这个
 功能坏了，其实是测试把数据造错了。
@@ -305,7 +307,7 @@ curl -s -X POST http://127.0.0.1:29861/auth \
 python tests/expiry-fixed-verify.py \
   --base https://panel.example.com --store-key <商城密钥> \
   --ssh-alias panel-host --node-host <节点IP> --node-key <portal api_key> \
-  --node-ssh-key "F:/服务器密钥/gcp-<IP>/<私钥名>"
+  --node-ssh-key "/path/to/node-ssh-private-key"
 ```
 
 ### ⚠️ 这个脚本自己踩过的三个坑（都会把 bug 伪装成通过）
@@ -443,18 +445,14 @@ python tests/with-panel-credential.py --ssh-alias "" --run 'systemctl is-active 
 PANEL_PASSWORD=<SEED_ADMIN_PASSWORD> python tests/panel-5rounds.py
 ```
 
-## `panel-r4-fault.py`：真故障注入
+## 真实故障注入演练原则（历史说明）
 
 R1–R3、R5 都是读接口断言，唯独告警中心没法靠读来验证 —— 「当前 0 条告警」
-既可能是真的没事，也可能是**告警永远不响**。这个脚本用真故障回答它。
-
-```bash
-PANEL_PASSWORD=<SEED_ADMIN_PASSWORD> python tests/panel-r4-fault.py
-```
-
-它会在 `jp` 上真的把 `hysteria-server.service` 停掉，然后盯完整条链路：
+既可能是真的没事，也可能是**告警永远不响**。开源版不内置直接停止目标节点服务的注入脚本，
+如需在隔离测试机演练告警闭环，可参考以下方法手工或自编脚本停掉测试节点上的 `hysteria-server.service`，
+盯完整条链路：
 节点转 `offline` → 出现 `node_offline` 告警 → 时间线写 `triggered`/`reopened`
-→ ack 转「已确认」→ 恢复后自动 `resolved`。跑完自动重启服务，不留副作用。
+→ ack 转「已确认」→ 恢复后自动 `resolved`。跑完务必重启服务，不留副作用。
 
 ### 三个必须写进脚本注释的教训（都是模拟真实故障时踩的）
 

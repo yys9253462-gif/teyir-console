@@ -79,9 +79,11 @@ func main() {
 	}
 	pingCancel()
 
-	if err := seedAdminUser(context.Background(), pool, logger, cfg.SeedAdminEmail, cfg.SeedAdminPassword); err != nil {
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	if err := seedAdminUser(seedCtx, pool, logger, cfg.SeedAdminEmail, cfg.SeedAdminPassword); err != nil {
 		logger.Warn("seed admin user failed", "error", err)
 	}
+	seedCancel()
 
 	// IP 检测密钥：环境变量是初始值，系统设置里填的会覆盖（handler.LoadPurityKeys）。
 	purityKeys := ippurity.NewKeyStore(map[string]string{
@@ -133,10 +135,14 @@ func main() {
 	// 告警通知 goroutine 在按静默期睡眠；进程退出时若不通知它们，
 	// 这些睡眠中的告警会无声丢失。用一个通道让 handler 能感知关闭。
 	handler.SetShutdownNotify(shutdownCtx.Done())
+	var metricsCollector *collector.Collector
+	var collectorCancel context.CancelFunc = func() {}
 	if cfg.EnableCollector {
-		collectorCtx, collectorCancel := context.WithCancel(context.Background())
+		var collectorCtx context.Context
+		collectorCtx, collectorCancel = context.WithCancel(context.Background())
 		defer collectorCancel()
-		go collector.NewCollector(logger, pool, cfg.CollectorSeconds, box).Run(collectorCtx)
+		metricsCollector = collector.NewCollector(logger, pool, cfg.CollectorSeconds, box)
+		metricsCollector.Start(collectorCtx)
 		logger.Info("collector started", "interval_seconds", cfg.CollectorSeconds)
 	}
 	// Alert reconciliation is a periodic state sync, not a request handler, so it
@@ -182,7 +188,9 @@ func main() {
 	trafficCtx, trafficCancel := context.WithCancel(context.Background())
 	defer trafficCancel()
 	handler.StartNodeTrafficMeter(trafficCtx)
-	handler.LoadPurityKeys(context.Background())
+	purityLoadCtx, purityLoadCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	handler.LoadPurityKeys(purityLoadCtx)
+	purityLoadCancel()
 	handler.BackfillIPNative(trafficCtx)
 	handler.StartBlockChecker(trafficCtx)
 	handler.StartTelegramBot(trafficCtx)
@@ -216,17 +224,26 @@ func main() {
 		os.Exit(1)
 	}
 	<-shutdownDone
-	// 优雅停止执行器并限时等待在途任务写回完成，避免进程退出打断正在落盘的任务结果。
+	// HTTP 排空后立即取消全部后台周期任务，避免进程关闭前继续发起新任务或在连接池关闭瞬间打断落盘。
+	alertCancel()
+	subscriptionCancel()
+	trafficCancel()
+	monitoringCancel()
+	collectorCancel()
+	// 优雅停止执行器与采集器并限时等待在途写回完成，避免进程退出打断正在落盘的任务结果。
 	executorCancel()
-	execDone := make(chan struct{})
+	drainDone := make(chan struct{})
 	go func() {
-		defer close(execDone)
+		defer close(drainDone)
 		taskExecutor.Wait()
+		if metricsCollector != nil {
+			metricsCollector.Wait()
+		}
 	}()
 	select {
-	case <-execDone:
+	case <-drainDone:
 	case <-time.After(8 * time.Second):
-		logger.Warn("executor shutdown drain timed out")
+		logger.Warn("background worker shutdown drain timed out")
 	}
 	logger.Info("api server stopped")
 }

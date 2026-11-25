@@ -631,7 +631,7 @@ func (s *Server) xuiDeleteClient(w http.ResponseWriter, r *http.Request) {
 	}
 	inboundID := r.PathValue("inboundID")
 	clientID := r.PathValue("clientId")
-	if !xuiInboundIDPattern.MatchString(inboundID) || !xuiPathSegmentPattern.MatchString(clientID) {
+	if !xuiInboundIDPattern.MatchString(inboundID) || !xuiPathSegmentPattern.MatchString(clientID) || clientID == "." || clientID == ".." {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "路径参数不合法"})
 		return
 	}
@@ -679,7 +679,7 @@ func (s *Server) xuiResetClientTraffic(w http.ResponseWriter, r *http.Request) {
 	}
 	inboundID := r.PathValue("inboundID")
 	email := r.PathValue("email")
-	if !xuiInboundIDPattern.MatchString(inboundID) || !xuiEmailPattern.MatchString(email) {
+	if !xuiInboundIDPattern.MatchString(inboundID) || !xuiEmailPattern.MatchString(email) || email == "." || email == ".." {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "路径参数不合法"})
 		return
 	}

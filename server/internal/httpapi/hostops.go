@@ -730,7 +730,11 @@ func (s *Server) remoteTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	claims, _ := claimsFrom(r.Context())
-	release, ok := s.terminalGate.acquire(claims.Subject, r.PathValue("id"))
+	hostID := r.PathValue("id")
+	if norm, ok := canonicalUUID(hostID); ok {
+		hostID = norm
+	}
+	release, ok := s.terminalGate.acquire(claims.Subject, hostID)
 	if !ok {
 		hostError(w, 429, "终端并发上限：每用户/主机2会话，全局16")
 		return

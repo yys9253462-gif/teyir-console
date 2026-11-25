@@ -416,6 +416,7 @@ func (s *Server) portalNodeAction(w http.ResponseWriter, r *http.Request) {
 	// 而同样以 root 跑脚本的 install-hy2、迁移、换 IP 都早已要求管理员。
 	// 开关类（启用协议、BBR、WARP 开关与规则）仍对 operator 开放。
 	if portalActionAdminOnly(input.Verb, spec, input.Params) && claims.Role != "admin" {
+		s.auditDenied(r, "forbidden_admin_only")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf("「%s」仅限管理员操作", spec.Label)})
 		return
 	}
@@ -490,11 +491,12 @@ func (s *Server) portalNodeAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
 		// 超时 ≠ 失败：节点上的 root 脚本很可能仍在跑（门户自己的死线比这里长时更是如此）。
-		// 如实说「结果未知，请核验」，并留下审计 —— 原来这里回 502「失败」且不写审计，
-		// 实际跑过的安装 / 升级在审计里完全看不到。
-		s.audit(r.Context(), r, "portal_"+input.Verb+"_unknown", "hysteria_node", nodeID, map[string]any{
+		// 如实说「结果未知，请核验」，并留下审计 —— 使用脱离请求取消的独立短超时上下文，防止客户端断开或超时导致审计丢单。
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+		s.audit(auditCtx, r, "portal_"+input.Verb+"_unknown", "hysteria_node", nodeID, map[string]any{
 			"endpoint": spec.Path, "reason": "面板等待超时，节点可能仍在执行", "budget_seconds": int(budget.Seconds()),
 		})
+		cancelAudit()
 		writeJSON(w, http.StatusGatewayTimeout, map[string]string{
 			"error": fmt.Sprintf("等待「%s」返回超时（%d 秒），节点侧可能仍在执行，结果未知；请稍后在节点状态里核验，不要立即重试", spec.Label, int(budget.Seconds())),
 		})
@@ -584,9 +586,9 @@ func validateActionForm(spec portalActionSpec, form map[string]string) error {
 		if id := form["id"]; id != "" && !proxyIDPattern.MatchString(id) && !proxyPrefixedIDPattern.MatchString(id) {
 			return errors.New("代理服务 id 格式不合法")
 		}
-		for _, key := range []string{"username", "note"} {
+		for _, key := range []string{"username", "password", "note"} {
 			if v := form[key]; controlChars.MatchString(v) {
-				return errors.New("用户名与备注里不能有控制字符或换行")
+				return errors.New("用户名、密码与备注里不能有控制字符或换行")
 			}
 		}
 		if ptype := form["type"]; ptype != "" && ptype != "socks5" && ptype != "http" && ptype != "https" {

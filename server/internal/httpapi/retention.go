@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"time"
 )
 
@@ -58,7 +59,14 @@ func (s *Server) StartSampleRetention(ctx context.Context) {
 		ticker := time.NewTicker(retentionInterval)
 		defer ticker.Stop()
 		for {
-			s.pruneSamples(ctx, time.Now().Add(-sampleRetention))
+			func() {
+				defer func() {
+					if rec := recover(); rec != nil && s.logger != nil {
+						s.logger.Error("retention: 清理过期采样协程发生异常恢复", "panic", rec, "stack", string(debug.Stack()))
+					}
+				}()
+				s.pruneSamples(ctx, time.Now().Add(-sampleRetention))
+			}()
 			select {
 			case <-ctx.Done():
 				return
@@ -189,9 +197,12 @@ func (s *Server) retentionOwnerIDs(ctx context.Context, query, what string) ([]s
 	var ids []string
 	for rows.Next() {
 		var id string
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			s.logger.Warn("retention: scan "+what+" failed", "error", err)
+			return nil, false
 		}
+		ids = append(ids, id)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, isAdminSession, loadSession, ADMIN_ONLY_HINT, type OperationTask, type Server } from '../lib/api'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
@@ -49,6 +49,11 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
   const [createErrors, setCreateErrors] = useState<Record<string, string>>({})
   const [tasks, setTasks] = useState<Record<string, OperationTask>>({})
   const [pollError, setPollError] = useState('')
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const current = PRESETS.find((p) => p.key === preset)!
   const eligible = servers.filter((s) => !blockedReason(s, current.readOnly))
@@ -118,8 +123,10 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
         bad[id] = err instanceof Error ? err.message : String(err)
       }
     }
-    setCreated(ok); setCreateErrors(bad)
-    setSubmitting(false)
+    if (mountedRef.current) {
+      setCreated(ok); setCreateErrors(bad)
+      setSubmitting(false)
+    }
     notify(`已创建 ${Object.keys(ok).length} 个「${current.label}」任务${Object.keys(bad).length ? `，${Object.keys(bad).length} 台创建失败` : ''}`)
   }
 
@@ -136,8 +143,8 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
       <p className="form-note" style={{ marginBottom: 10 }}>{current.hint}</p>
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-        <button className="button button-quiet" disabled={submitting || pending || !eligible.length} onClick={() => setSelected(eligible.map((s) => s.id))}>全选可执行（{eligible.length}）</button>
-        <button className="button button-quiet" disabled={submitting || pending || !selected.length} onClick={() => setSelected([])}>清空选择</button>
+        <button className="button button-quiet" disabled={readOnly || !admin || submitting || pending || !eligible.length} onClick={() => setSelected(eligible.map((s) => s.id))}>全选可执行（{eligible.length}）</button>
+        <button className="button button-quiet" disabled={readOnly || !admin || submitting || pending || !selected.length} onClick={() => setSelected([])}>清空选择</button>
         <button className="button button-primary" disabled={readOnly || !admin || submitting || pending || !selected.length} title={readOnly ? '只读账号不能执行预设任务' : !admin ? ADMIN_ONLY_HINT : undefined} onClick={() => void start()}>
           {submitting ? '创建任务…' : pending ? '执行中…' : `开始执行（${selected.length}）`}
         </button>
@@ -145,7 +152,9 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
       {readOnly && <p>只读账号只能查看，不能执行。</p>}
       {!readOnly && !admin && <p className="form-note">{ADMIN_ONLY_HINT}（系统预设任务需管理员权限）。</p>}
       {eligible.length < servers.length && <p className="form-note" style={{ marginBottom: 8 }}>
-        灰色的主机不能执行：预设任务会改动系统，需要该主机已配置 SSH 凭据并开启写操作授权。
+        {current.readOnly
+          ? '灰色的主机不能执行：该只读检查需要主机已配置 SSH 凭据。'
+          : '灰色的主机不能执行：预设任务会改动系统，需要该主机已配置 SSH 凭据并开启写操作授权。'}
       </p>}
 
       {pollError && <p role="alert" style={{ margin: '0 0 8px', color: 'var(--amber-text)' }}>⚠ {pollError}</p>}
@@ -161,7 +170,7 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
           const task = created[server.id] ? tasks[created[server.id]] : undefined
           const createError = createErrors[server.id]
           return <label key={server.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', padding: '4px 0', borderBottom: '1px solid var(--line-soft)', opacity: reason ? 0.6 : 1 }}>
-            <input type="checkbox" checked={selected.includes(server.id)} disabled={Boolean(reason) || submitting || pending}
+            <input type="checkbox" checked={selected.includes(server.id)} disabled={readOnly || !admin || Boolean(reason) || submitting || pending}
               onChange={(e) => setSelected((ids) => e.target.checked ? [...ids, server.id] : ids.filter((id) => id !== server.id))} />
             <span style={{ flexShrink: 0 }}>{server.name}</span>
             <small style={{ color: 'var(--faint)' }}>{server.host}</small>

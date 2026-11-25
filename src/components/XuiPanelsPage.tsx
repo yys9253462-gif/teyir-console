@@ -8,7 +8,7 @@ import {
   isAdminSession,
 } from '../lib/api'
 import { formatBytes } from '../lib/format'
-import { Modal } from './Modal'
+import { hasOpenModal, Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
 
 // 3X-UI 面板管理页。
@@ -47,7 +47,14 @@ function GeoTag({ region, provider, source }: { region: string; provider: string
 function formatExpiry(ms: number): string {
   if (!ms) return '永不过期'
   if (ms < 0) return `首次使用后 ${Math.round(-ms / 86_400_000)} 天到期`
-  return new Date(ms).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+  const d = new Date(ms)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' })
+}
+
+function formatCheckedAt(iso: string | null | undefined): string {
+  if (!iso) return '尚未探测'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '探测时间未知' : `探测于 ${d.toLocaleString('zh-CN', { hour12: false })}`
 }
 
 function expiryRemaining(ms: number): { text: string; warn: boolean } {
@@ -79,23 +86,38 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
   const [pendingDelete, setPendingDelete] = useState<XuiPanel | null>(null)
   // 2026-11-06：列表读取失败单独标记，原来失败时显示「还没有登记 3X-UI 面板」。
   const [loadError, setLoadError] = useState('')
+  const viewer = loadSession()?.role === 'viewer'
+  const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
 
   const load = useCallback(async (): Promise<boolean> => {
+    const seq = ++loadSeq.current
     try {
-      setPanels(await api.xuiPanels())
+      const list = await api.xuiPanels()
+      if (!mountedRef.current || seq !== loadSeq.current) return false
+      setPanels(list ?? [])
       setLoadError('')
       return true
     } catch (err) {
+      if (!mountedRef.current || seq !== loadSeq.current) return false
       const message = err instanceof Error ? err.message : '读取失败'
       setLoadError(message)
       notify(`读取 3X-UI 面板失败：${message}`)
       return false
     } finally {
-      setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
   }, [notify])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { void load() }, [load])
 
   function openAdd() {
     setDraft(emptyDraft)
@@ -104,6 +126,7 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
   }
 
   async function runPreview() {
+    if (busy) return
     if (!draft.base_url.trim() || !draft.username.trim() || !draft.password) {
       notify('请填写面板地址、用户名与密码')
       return
@@ -116,17 +139,20 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
         username: draft.username.trim(),
         password: draft.password,
       })
+      if (!mountedRef.current) return
       setPreview(result)
       notify(`连通成功：${result.inbounds_count} 个入站 / ${result.clients_count} 个客户端`)
     } catch (err) {
+      if (!mountedRef.current) return
       setPreview(null)
       notify(err instanceof Error ? `连接失败：${err.message}` : '连接失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function submitAdd() {
+    if (busy) return
     // 名称**允许留空**：服务端会按面板地址里的公网 IP 自动识别地区与商家
     // 来命名。但留空且识别不出来时，后端会因为没有名字而存成空串 ——
     // 所以这里不能不做任何检查就放行。取一个"至少能看"的兜底：
@@ -147,46 +173,51 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
         username: draft.username.trim(),
         password: draft.password,
       })
+      if (!mountedRef.current) return
       notify(`已添加 3X-UI 面板：${draft.name.trim() || draft.base_url.trim()}`)
       setAdding(false)
       setDraft(emptyDraft)
       setPreview(null)
       await load()
     } catch (err) {
-      notify(err instanceof Error ? `添加失败：${err.message}` : '添加失败')
+      if (mountedRef.current) notify(err instanceof Error ? `添加失败：${err.message}` : '添加失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function confirmDelete() {
-    if (!pendingDelete) return
+    if (!pendingDelete || busy) return
     const target = pendingDelete
     setPendingDelete(null)
     setBusy(true)
     try {
       await api.xuiDeletePanel(target.id)
+      if (!mountedRef.current) return
       notify(`已删除 3X-UI 面板：${target.name}`)
       if (selected?.id === target.id) setSelected(null)
       await load()
     } catch (err) {
-      notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
+      if (mountedRef.current) notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function refresh(panel: XuiPanel) {
+    if (viewer || refreshing) return
     setRefreshing(panel.id)
     try {
       const result = await api.xuiRefreshPanel(panel.id)
+      if (!mountedRef.current) return
       notify(`已刷新 ${panel.name}：${result.inbounds_count} 个入站 / ${result.online_count === null ? '在线人数未取到' : `${result.online_count} 人在线`}`)
       await load()
     } catch (err) {
+      if (!mountedRef.current) return
       notify(err instanceof Error ? `刷新失败：${err.message}` : '刷新失败')
       await load()
     } finally {
-      setRefreshing('')
+      if (mountedRef.current) setRefreshing('')
     }
   }
 
@@ -281,8 +312,9 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
                         <button
                           className="icon-button compact"
                           aria-label={`刷新 ${panel.name}`}
-                          disabled={refreshing === panel.id}
-                          onClick={(event) => { event.stopPropagation(); refresh(panel) }}
+                          disabled={viewer || refreshing === panel.id}
+                          title={viewer ? '只读账号不能主动刷新外部面板状态' : '重新连接并刷新面板统计'}
+                          onClick={(event) => { event.stopPropagation(); void refresh(panel) }}
                         >
                           <RefreshCw size={15} className={refreshing === panel.id ? 'spin' : undefined} />
                         </button>
@@ -370,7 +402,7 @@ export function XuiPanelsPage({ notify }: { notify: (message: string) => void })
           </p>
           <div className="modal-actions">
             <button className="button button-quiet" onClick={() => setPendingDelete(null)}>取消</button>
-            <button className="button button-primary" onClick={confirmDelete}>确认移除登记</button>
+            <button className="button button-danger" disabled={busy} onClick={confirmDelete}>{busy ? '移除中…' : '确认移除登记'}</button>
           </div>
         </Modal>
       )}
@@ -399,36 +431,41 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
   const [busy, setBusy] = useState(false)
   const [onlinesError, setOnlinesError] = useState('')
   const loadSeq = useRef(0)
+  const mountedRef = useRef(true)
 
   const load = useCallback(async () => {
     const seq = ++loadSeq.current
     setLoading(true)
     try {
       const result = await api.xuiInbounds(panel.id)
-      if (seq !== loadSeq.current) return
-      setInbounds(result.inbounds)
-      setClients(result.clients)
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setInbounds(result.inbounds ?? [])
+      setClients(result.clients ?? [])
       setOnlinesError(result.onlines_error ?? '')
       setLoadError('')
     } catch (err) {
-      if (seq !== loadSeq.current) return
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setLoadError(err instanceof Error ? err.message : '读取失败')
       setInbounds([])
       setClients([])
     } finally {
-      if (seq === loadSeq.current) setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
   }, [panel.id])
 
   useEffect(() => {
+    mountedRef.current = true
     void load()
-    return () => { loadSeq.current++ }
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
   }, [load])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      // 子弹窗打开时交由 Modal 栈处理 Esc，不直接把整个抽屉关掉。
-      if (event.key === 'Escape' && !creating && !pendingClientDelete) {
+      // 子弹窗或全局确认弹窗打开时交由 Modal 栈处理 Esc，不把整个抽屉关掉。
+      if (event.key === 'Escape' && !event.defaultPrevented && !creating && !pendingClientDelete && !hasOpenModal()) {
         onClose()
       }
     }
@@ -453,36 +490,40 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
   const onlineCount = clients.filter((client) => client.online).length
 
   async function resetTraffic(client: XuiClientStatus) {
+    if (busy) return
     // 2026-11-06：重置流量不可撤销（已用量清零、配额重新放开），原来一点即执行，误点就把这个客户的用量记录抹掉了。
     if (!await askConfirm(`重置 ${client.email} 的已用流量？
 
 已用量会清零，配额重新放开，无法撤销。`, { confirmText: '重置', danger: true })) return
+    if (!mountedRef.current) return
     setBusy(true)
     try {
       await api.xuiResetClientTraffic(panel.id, client.inbound_id, client.email)
+      if (!mountedRef.current) return
       notify(`已重置流量：${client.email}`)
       await load()
     } catch (err) {
-      notify(err instanceof Error ? `重置失败：${err.message}` : '重置失败')
+      if (mountedRef.current) notify(err instanceof Error ? `重置失败：${err.message}` : '重置失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
   async function confirmDeleteClient() {
-    if (!pendingClientDelete) return
+    if (!pendingClientDelete || busy) return
     const target = pendingClientDelete
     setPendingClientDelete(null)
     setBusy(true)
     try {
       await api.xuiDeleteClient(panel.id, target.inbound_id, target.client_id)
+      if (!mountedRef.current) return
       notify(`已删除客户端：${target.email}`)
       await load()
       await onChanged()
     } catch (err) {
-      notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
+      if (mountedRef.current) notify(err instanceof Error ? `删除失败：${err.message}` : '删除失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -499,7 +540,7 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
 
         <div className="drawer-status">
           <span className={`status-badge ${statusClass[panel.last_status] ?? 'offline'}`}><i />{statusText[panel.last_status] ?? panel.last_status}</span>
-          <span>{panel.last_checked_at ? `探测于 ${new Date(panel.last_checked_at).toLocaleString('zh-CN', { hour12: false })}` : '尚未探测'}</span>
+          <span>{formatCheckedAt(panel.last_checked_at)}</span>
         </div>
 
         <div className="drawer-address">
@@ -518,7 +559,7 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
           <div><span>登录用户</span><strong>{panel.username}</strong></div>
           <div><span>凭据状态</span><strong>已加密保存</strong></div>
           <div><span>入站数量</span><strong>{inbounds.length || panel.inbounds_count}</strong></div>
-          <div><span>客户端</span><strong>{clients.length || panel.clients_count}（{onlineCount} 在线）</strong></div>
+          <div><span>客户端</span><strong>{clients.length || panel.clients_count}（{!loadError && onlinesError ? '在线未知' : `${onlineCount} 在线`}）</strong></div>
         </div>
 
         <div className="drawer-actions" style={{ marginBottom: 14 }}>
@@ -652,7 +693,7 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
           </p>
           <div className="modal-actions">
             <button className="button button-quiet" onClick={() => setPendingClientDelete(null)}>取消</button>
-            <button className="button button-primary" onClick={confirmDeleteClient}>确认删除</button>
+            <button className="button button-danger" disabled={busy} onClick={confirmDeleteClient}>{busy ? '删除中…' : '确认删除'}</button>
           </div>
         </Modal>
       )}
@@ -675,10 +716,16 @@ function AddClientModal({ panel, inbounds, defaultInbound, onClose, onDone, noti
   const [expireDays, setExpireDays] = useState('30')
   const [limitGB, setLimitGB] = useState('0')
   const [busy, setBusy] = useState(false)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   const selected = inbounds.find((inbound) => inbound.id === inboundID)
 
   async function submit() {
+    if (busy) return
     const trimmedEmail = email.trim()
     // 与服务端同一套白名单，前端先挡一道，避免白跑一次请求。
     if (!/^[A-Za-z0-9._@+-]{1,64}$/.test(trimmedEmail)) {
@@ -704,12 +751,13 @@ function AddClientModal({ panel, inbounds, defaultInbound, onClose, onDone, noti
         limit_total_bytes: Math.round(gb * 1024 * 1024 * 1024),
         expire_days: days,
       })
+      if (!mountedRef.current) return
       notify(`已新增客户端：${trimmedEmail}`)
       await onDone()
     } catch (err) {
-      notify(err instanceof Error ? `新增失败：${err.message}` : '新增失败')
+      if (mountedRef.current) notify(err instanceof Error ? `新增失败：${err.message}` : '新增失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -731,7 +779,7 @@ function AddClientModal({ panel, inbounds, defaultInbound, onClose, onDone, noti
       </label>
       {selected && (
         <p className="form-note" style={{ marginTop: 8 }}>
-          当前入站已有 {selected.clients.length} 个客户端，端口 {selected.port}，协议 {selected.protocol}。
+          当前入站已有 {(selected.clients ?? []).length} 个客户端，端口 {selected.port}，协议 {selected.protocol}。
         </p>
       )}
       <label className="login-field" style={{ marginTop: 10 }}>

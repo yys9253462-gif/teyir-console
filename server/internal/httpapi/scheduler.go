@@ -274,13 +274,11 @@ func (s *Server) runScheduleJob(ctx context.Context, j scheduleJob) {
 	var settings []scheduleSetting
 	var exhausted bool
 	if runCtx.Err() != nil {
-		state.Failed++
+		state.inc()
 	}
-	if state.Failed > 0 {
-		// 重试有上限（2026-10-16 审查后加）：原来失败就每 5 分钟整轮重跑、没有上限 ——
-		// 某台节点一直不通时，每周的 IP 纯净度会每 5 分钟消耗一轮第三方配额（一天约 2900 次），
-		// 解锁检测也会每 5 分钟从节点去访问 Netflix / OpenAI，容易让 IP 被标记。
-		// 现在：最多重试 3 次，间隔 5 → 15 → 45 分钟；仍失败就放弃，等下一个正常周期。
+	failedCount := state.count()
+	if failedCount > 0 {
+		// 重试有上限（2026-10-16 审查后加）：最多重试 3 次，间隔 5 → 15 → 45 分钟；仍失败就放弃，等下一个正常周期。
 		readCtx, cancelRead := context.WithTimeout(context.WithoutCancel(ctx), scheduleDBTimeout)
 		var raw string
 		err := s.db.QueryRow(readCtx, `SELECT value FROM system_settings WHERE key=$1`, "schedule_retry_count_"+j.Key).Scan(&raw)
@@ -300,7 +298,7 @@ func (s *Server) runScheduleJob(ctx context.Context, j scheduleJob) {
 			settings = []scheduleSetting{
 				{"schedule_retry_count_" + j.Key, fmt.Sprint(attempt), "巡检已重试次数"},
 				{"schedule_retry_" + j.Key, time.Now().Add(wait).UTC().Format(time.RFC3339), "失败巡检退避重试"},
-				{"schedule_error_" + j.Key, fmt.Sprintf("%d 项检查失败，%d 分钟后第 %d/%d 次重试", state.Failed, int(wait.Minutes()), attempt, scheduleMaxRetries), "巡检错误"},
+				{"schedule_error_" + j.Key, fmt.Sprintf("%d 项检查失败，%d 分钟后第 %d/%d 次重试", failedCount, int(wait.Minutes()), attempt, scheduleMaxRetries), "巡检错误"},
 			}
 		} else {
 			// 放弃：按「已运行」记账，下一次在正常周期（每天 / 每周）再跑。
@@ -309,7 +307,7 @@ func (s *Server) runScheduleJob(ctx context.Context, j scheduleJob) {
 				{"schedule_last_" + j.Key, time.Now().UTC().Format(time.RFC3339), "巡检最近运行时间（重试用尽）"},
 				{"schedule_retry_" + j.Key, "", "巡检重试已清除"},
 				{"schedule_retry_count_" + j.Key, "0", "巡检已重试次数"},
-				{"schedule_error_" + j.Key, fmt.Sprintf("连续 %d 次重试仍有 %d 项失败，已停止重试，等下个周期", scheduleMaxRetries, state.Failed), "巡检错误"},
+				{"schedule_error_" + j.Key, fmt.Sprintf("连续 %d 次重试仍有 %d 项失败，已停止重试，等下个周期", scheduleMaxRetries, failedCount), "巡检错误"},
 			}
 		}
 	} else {
@@ -325,7 +323,7 @@ func (s *Server) runScheduleJob(ctx context.Context, j scheduleJob) {
 		return
 	}
 	if exhausted {
-		s.telegramNotifyAsync(fmt.Sprintf("%s：连续重试 %d 次仍有 %d 项检查失败，已停止重试，等下个周期再跑。", j.Label, scheduleMaxRetries, state.Failed))
+		s.telegramNotifyAsync(fmt.Sprintf("%s：连续重试 %d 次仍有 %d 项检查失败，已停止重试，等下个周期再跑。", j.Label, scheduleMaxRetries, failedCount))
 	}
 	s.logger.Info("schedule: job finished", "job", j.Key, "changes", msg != "")
 	if msg != "" {
@@ -558,13 +556,21 @@ WHERE t.id = ANY($1::uuid[])`, ids)
 	var all []res
 	for rows.Next() {
 		var r res
-		if rows.Scan(&r.status, &r.summary, &r.name) == nil {
-			all = append(all, r)
+		if err := rows.Scan(&r.status, &r.summary, &r.name); err != nil {
+			rows.Close()
+			return
 		}
+		all = append(all, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return
 	}
 	rows.Close()
-	if rows.Err() != nil || len(all) != len(ids) {
-		return // 不完整的结果不能当作全体任务已完成
+	// 仅在查询失败时才中断；若部分旧任务记录已被历史清理，剩余任务全部结束时仍应照常汇总并清空待办列表，防止周报永久卡死。
+	if len(all) == 0 {
+		_ = s.putSetting(ctx, "schedule_audit_tasks", "[]", "定时安全检查待汇总的任务")
+		return
 	}
 	for _, r := range all {
 		if r.status == "queued" || r.status == "running" {
@@ -740,10 +746,25 @@ func (s *Server) runScheduleNow(w http.ResponseWriter, r *http.Request) {
 }
 
 type scheduleRunKey struct{}
-type scheduleRunState struct{ Failed int }
+type scheduleRunState struct {
+	mu     sync.Mutex
+	Failed int
+}
+
+func (st *scheduleRunState) inc() {
+	st.mu.Lock()
+	st.Failed++
+	st.mu.Unlock()
+}
+
+func (st *scheduleRunState) count() int {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.Failed
+}
 
 func scheduleFailed(ctx context.Context) {
 	if state, ok := ctx.Value(scheduleRunKey{}).(*scheduleRunState); ok {
-		state.Failed++
+		state.inc()
 	}
 }

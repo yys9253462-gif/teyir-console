@@ -51,6 +51,11 @@ func NewCache(ttl time.Duration, maxEntries int) *Cache {
 
 // Get 取缓存。命中且未过期返回 (info, true)。
 func (c *Cache) Get(ip string) (Info, bool) {
+	return c.GetAt(ip, time.Now())
+}
+
+// GetAt 按指定时刻取缓存，供解析器与测试保持时钟口径一致。
+func (c *Cache) GetAt(ip string, now time.Time) (Info, bool) {
 	if c == nil {
 		return Info{}, false
 	}
@@ -61,7 +66,7 @@ func (c *Cache) Get(ip string) (Info, bool) {
 	if !ok {
 		return Info{}, false
 	}
-	if time.Now().After(entry.expiresAt) {
+	if now.After(entry.expiresAt) {
 		delete(c.entries, key)
 		return Info{}, false
 	}

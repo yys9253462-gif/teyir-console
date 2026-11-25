@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/ssh"
+	"nodeops/server/internal/ippurity"
 	"nodeops/server/internal/sshclient"
 )
 
@@ -48,9 +50,20 @@ func hy2InstallScriptURL() (string, error) {
 	if raw == "" {
 		return "", errors.New("未配置节点安装脚本地址，请设置环境变量 HY2_INSTALL_SCRIPT_URL（HTTPS 地址）")
 	}
+	if strings.ContainsAny(raw, " \t\r\n'\"") || controlChars.MatchString(raw) {
+		return "", errors.New("环境变量 HY2_INSTALL_SCRIPT_URL 包含非法空白或控制字符")
+	}
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host == "" || strings.ContainsAny(raw, " \t\r\n'\"") {
-		return "", errors.New("环境变量 HY2_INSTALL_SCRIPT_URL 必须为合法的 HTTPS 脚本地址")
+	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil {
+		return "", errors.New("环境变量 HY2_INSTALL_SCRIPT_URL 必须为不含凭据的合法 HTTPS 脚本地址")
+	}
+	host := strings.ToLower(u.Hostname())
+	if ip := net.ParseIP(host); ip != nil {
+		if !ippurity.IsPublicIP(host) {
+			return "", errors.New("环境变量 HY2_INSTALL_SCRIPT_URL 不能指向内网或回环地址")
+		}
+	} else if host == "localhost" || !strings.Contains(host, ".") {
+		return "", errors.New("环境变量 HY2_INSTALL_SCRIPT_URL 必须使用公网可访问域名")
 	}
 	return raw, nil
 }
@@ -238,6 +251,9 @@ func (s *Server) startInstallHy2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	serverID := r.PathValue("id")
+	if norm, ok := canonicalUUID(serverID); ok {
+		serverID = norm
+	}
 	var in installHy2Request
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid payload"})
@@ -385,6 +401,15 @@ func (s *Server) runInstallHy2(ctx context.Context, jobID, serverID, host string
 			s.logger.Warn("install hy2 failed", "server", serverID, "error", maskHostJobOutput(err.Error()))
 		}
 	}
+	// 捕获后台安装协程异常，防止 panic 永久锁死主机安装租约。
+	defer func() {
+		if rec := recover(); rec != nil {
+			if s.logger != nil {
+				s.logger.Error("install hy2 panic", "server", serverID, "panic", rec, "stack", string(debug.Stack()))
+			}
+			finish(fmt.Errorf("一键安装发生内部异常: %v", rec), "", "")
+		}
+	}()
 	// interrupt 用于「远端可能还在跑」的结局：记 interrupted、**保留**主机租约与 byServer 互斥，
 	// 交给已有的「确认远端已停止后解除互斥」流程（resolveInstallJob）。
 	interrupt := func(reason string) {

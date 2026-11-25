@@ -133,7 +133,8 @@ func (p IPAPIIs) Lookup(ctx context.Context, client *http.Client, ip string) (*V
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, err
+		// 严禁直接返回 *url.Error 原文，避免把查询串中的密钥写入数据库并暴露给前端。
+		return nil, errors.New("构造 ipapi.is 请求失败")
 	}
 	req.Header.Set("Accept", "application/json")
 

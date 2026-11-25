@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, type Server, type ServerBilling, type ServerTrendPoint } from '../lib/api'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
@@ -7,13 +7,25 @@ import { askConfirm } from './ConfirmHost'
 
 export const CURRENCY_SYMBOL: Record<string, string> = { USD: '$', CNY: '¥', EUR: '€', HKD: 'HK$', JPY: '¥' }
 
-/** 距到期还有几天（按本地日期）；未填写返回 null。 */
+/** 距到期还有几天（按本地日期）；未填写或格式异常返回 null。 */
 export function daysUntil(expiresOn: string | null | undefined): number | null {
   if (!expiresOn) return null
-  const [y, m, d] = expiresOn.split('-').map(Number)
-  const end = new Date(y, m - 1, d).getTime()
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expiresOn.trim())
+  if (!match) return null
+  const y = Number(match[1])
+  const m = Number(match[2])
+  const d = Number(match[3])
+  const endDate = new Date(y, m - 1, d)
+  if (endDate.getFullYear() !== y || endDate.getMonth() !== m - 1 || endDate.getDate() !== d) return null
+  const end = endDate.getTime()
   const today = new Date(); today.setHours(0, 0, 0, 0)
   return Math.round((end - today.getTime()) / 86_400_000)
+}
+
+function isValidIPv4(raw: string): boolean {
+  const parts = raw.trim().split('.')
+  if (parts.length !== 4) return false
+  return parts.every((part) => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255)
 }
 
 export function ExpiryBadge({ billing }: { billing?: ServerBilling }) {
@@ -41,22 +53,28 @@ export function BillingDialog({ server, billing, onClose, onSaved, notify }: {
   const [autoRenew, setAutoRenew] = useState(billing?.auto_renew ?? false)
   const [note, setNote] = useState(billing?.note ?? '')
   const [busy, setBusy] = useState(false)
-  const costOk = cost === '' || (!Number.isNaN(Number(cost)) && Number(cost) >= 0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const trimmedCost = cost.trim()
+  const costOk = trimmedCost === '' || (Number.isFinite(Number(trimmedCost)) && Number(trimmedCost) >= 0)
 
   async function save() {
     setBusy(true)
     try {
       const saved = await api.setServerBilling(server.id, {
-        expires_on: expires || null, monthly_cost: cost === '' ? null : Number(cost),
+        expires_on: expires || null, monthly_cost: trimmedCost === '' ? null : Number(trimmedCost),
         currency, auto_renew: autoRenew, note,
       })
       notify(`已保存 ${server.name} 的到期与费用`)
       onSaved({ ...saved, server_id: server.id })
-      onClose()
+      if (mountedRef.current) onClose()
     } catch (err) {
       notify(err instanceof Error ? err.message : '保存失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -93,20 +111,25 @@ export function ChangeIPDialog({ server, onClose, onDone, notify }: {
   const [updateDNS, setUpdateDNS] = useState(true)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<Awaited<ReturnType<typeof api.changeServerIP>> | null>(null)
-  const ipOk = /^(\d{1,3})(\.\d{1,3}){3}$/.test(ip.trim())
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+  const ipOk = isValidIPv4(ip)
 
   async function submit() {
     if (!await askConfirm(`把 ${server.name} 的地址从 ${server.host} 改为 ${ip.trim()}？`)) return
     setBusy(true)
     try {
       const r = await api.changeServerIP(server.id, ip.trim(), updateDNS)
-      setResult(r)
+      if (mountedRef.current) setResult(r)
       notify(r.dns_ok === false ? `${server.name} 的地址已改为 ${r.new_ip}，但有节点域名 DNS 更新失败，请查看明细` : `${server.name} 的地址已改为 ${r.new_ip}`)
       onDone()
     } catch (err) {
       notify(err instanceof Error ? err.message : '修改失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -126,8 +149,8 @@ export function ChangeIPDialog({ server, onClose, onDone, notify }: {
       ) : (
         <div style={{ display: 'grid', gap: 10 }}>
           <p>地址已更新：<code>{result.old_ip}</code> → <code>{result.new_ip}</code></p>
-          {result.dns.length > 0 && <ul className="change-ip-dns">
-            {result.dns.map((d) => <li key={d.node}><strong>{d.node}</strong> <span className="traffic-sub">{d.domain || '—'}</span> · {d.failed ? <strong>{d.result}</strong> : d.result}{d.warning && <span className="traffic-sub">（{d.warning}）</span>}</li>)}
+          {(result.dns ?? []).length > 0 && <ul className="change-ip-dns">
+            {(result.dns ?? []).map((d) => <li key={d.node}><strong>{d.node}</strong> <span className="traffic-sub">{d.domain || '—'}</span> · {d.failed ? <strong>{d.result}</strong> : d.result}{d.warning && <span className="traffic-sub">（{d.warning}）</span>}</li>)}
           </ul>}
           <p className="form-note">IP 变了，IP 纯净度与原生判定会显示「已变更」，建议到 IP 纯净度页重新检测。DNS 生效通常需要 1-5 分钟。</p>
           <div className="modal-actions"><button className="button button-primary" onClick={onClose}>完成</button></div>
@@ -153,28 +176,29 @@ export function HostTrend({ server }: { server: Server }) {
     let alive = true
     setPoints(null)
     api.serverTrend(server.id, days)
-      .then((r) => { if (alive) { setPoints(r.points); setError('') } })
+      .then((r) => { if (alive) { setPoints(r.points ?? []); setError('') } })
       .catch((err) => { if (alive) setError(err instanceof Error ? err.message : '读取失败') })
     return () => { alive = false }
   }, [server.id, days])
 
   const W = 440, H = 120
   const paths = useMemo(() => {
-    if (!points || points.length < 2) return []
-    const t0 = new Date(points[0].t).getTime()
-    const t1 = new Date(points[points.length - 1].t).getTime() || t0 + 1
+    const validPoints = (points ?? []).filter((p) => Number.isFinite(Date.parse(p.t)))
+    if (validPoints.length < 2) return []
+    const t0 = Date.parse(validPoints[0].t)
+    const t1 = Date.parse(validPoints[validPoints.length - 1].t) || t0 + 1
     return SERIES.map((s) => {
       let d = ''
       let pen = false
-      for (const p of points) {
+      for (const p of validPoints) {
         const v = p[s.key]
-        if (v == null) { pen = false; continue }
-        const x = ((new Date(p.t).getTime() - t0) / Math.max(1, t1 - t0)) * W
+        if (v == null || !Number.isFinite(v)) { pen = false; continue }
+        const x = ((Date.parse(p.t) - t0) / Math.max(1, t1 - t0)) * W
         const y = H - (Math.min(100, Math.max(0, v)) / 100) * H
         d += `${pen ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `
         pen = true
       }
-      const vals = points.map((p) => p[s.key]).filter((v): v is number => v != null)
+      const vals = validPoints.map((p) => p[s.key]).filter((v): v is number => v != null && Number.isFinite(v))
       return { ...s, d, max: vals.length ? Math.max(...vals) : null, last: vals.length ? vals[vals.length - 1] : null }
     })
   }, [points])

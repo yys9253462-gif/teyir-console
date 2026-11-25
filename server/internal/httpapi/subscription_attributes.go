@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -24,62 +25,94 @@ func subscriptionAttributes(rec *subscriptionRecord, now time.Time) map[string]a
 
 func (s *Server) syncSubscriptionNodeAttributes(ctx context.Context, rec *subscriptionRecord) subscriptionStateOutcome {
 	out := subscriptionStateOutcome{Failed: map[string]string{}}
-	// 与状态联动共用名称预取，节点读取失败时仍保留可读名称。
-	ids := make([]string, 0, len(rec.nodeAccounts))
-	for nodeID := range rec.nodeAccounts {
-		ids = append(ids, nodeID)
+	if rec == nil || len(rec.nodeAccounts) == 0 {
+		return out
 	}
-	names := s.nodeNamesByID(ctx, ids)
-	nameOf := func(id string) string {
-		if n := names[id]; n != "" {
-			return n
-		}
-		return id
+	type job struct {
+		nodeID string
+		userID string
 	}
-	// 2026-11-06：每个节点单独限时。原来整轮用请求 ctx 且没有单节点预算：11 台里 3 台不可达就要 60s+，
-	// 浏览器/反代先断开后，剩余节点的调用立刻 context canceled —— 而这批订阅的到期时间在循环之前
-	// 就已经提交进库，于是只有一部分节点收到新到期时间，且调用方拿已取消的 ctx 去登记重试也会失败。
+	jobs := make([]job, 0, len(rec.nodeAccounts))
 	for nodeID, acc := range rec.nodeAccounts {
-		nodeCtx, cancel := context.WithTimeout(ctx, provisionTimeout)
-		target, err := s.loadPortalTarget(nodeCtx, nodeID)
-		if err != nil {
-			cancel()
-			out.Failed[nameOf(nodeID)] = err.Error()
+		if acc.UserID == "" {
 			continue
 		}
-		attrs := subscriptionAttributes(rec, time.Now())
-		attrs["user_id"] = acc.UserID
-		// 先GET权威用户，不允许缺失用户通过编辑被重新开户。
-		_, err = portalCall(nodeCtx, target.BaseURL, target.APIKey, http.MethodGet, "/users/get/"+acc.UserID, nil)
-		if err == nil {
-			envelope, updateErr := portalCall(nodeCtx, target.BaseURL, target.APIKey, http.MethodPost, "/users/update", attrs)
-			err = updateErr
-			if err == nil {
-				var result struct {
-					OK bool `json:"ok"`
-				}
-				if json.Unmarshal(envelope.Data, &result) != nil || !result.OK {
-					err = errors.New("节点未确认属性同步")
-				}
-			}
-			// 2026-11-06：必须读回比对。原来只听 ok:true 就算 Applied：门户可能接受调用却钳住/忽略
-			// expires_at 或 ip_limit（老门户只认相对天数、或对 ip 上限有封顶），界面显示「已在 N 个节点更新」，
-			// 买家却按旧日期到期 / 上限没生效 —— 而调用方看到 allOK 就不会排后台重试。
-			// 同一件事在 reconcileOneNode 与 applySubscriptionNodeStatus 里都做了校验，只有这条没做。
-			if err == nil {
-				if verifyErr := verifySyncedAccountAttributes(nodeCtx, target, acc.UserID, rec); verifyErr != nil {
-					err = verifyErr
-				}
-			}
-		}
-		cancel()
-		if err != nil {
-			out.Failed[target.NodeName] = err.Error()
-		} else {
-			out.Applied = append(out.Applied, target.NodeName)
-		}
+		jobs = append(jobs, job{nodeID: nodeID, userID: acc.UserID})
 	}
-	return out
+	if len(jobs) == 0 {
+		return out
+	}
+	// 与状态联动共用名称预取与聚合逻辑：保留已删节点可读名称、识别 gone 状态并防同名节点互相覆盖。
+	ids := make([]string, 0, len(jobs))
+	for _, j := range jobs {
+		ids = append(ids, j.nodeID)
+	}
+	names := s.nodeNamesByID(ctx, ids)
+	results := make([]subscriptionStatusResult, len(jobs))
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i, j := range jobs {
+		wg.Add(1)
+		go func(i int, j job) {
+			defer wg.Done()
+			r := subscriptionStatusResult{nodeID: j.nodeID, name: names[j.nodeID]}
+			if r.name == "" {
+				r.name = j.nodeID
+			}
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				r.err = "操作已取消或超时"
+				results[i] = r
+				return
+			}
+			// 每个节点单独限时，防止慢节点耗尽整个请求周期导致后续节点同步中途取消。
+			nodeCtx, cancel := context.WithTimeout(ctx, provisionTimeout)
+			defer cancel()
+			target, err := s.loadPortalTarget(nodeCtx, j.nodeID)
+			if errors.Is(err, errPortalNodeNotFound) {
+				r.err = "节点记录已删除（这条映射是残留，可在节点页清理）"
+				r.gone = true
+				results[i] = r
+				return
+			}
+			if err != nil {
+				r.err = err.Error()
+				results[i] = r
+				return
+			}
+			r.name = target.NodeName
+			attrs := subscriptionAttributes(rec, time.Now())
+			attrs["user_id"] = j.userID
+			// 先GET权威用户，不允许缺失用户通过编辑被重新开户。
+			_, err = portalCall(nodeCtx, target.BaseURL, target.APIKey, http.MethodGet, "/users/get/"+j.userID, nil)
+			if err == nil {
+				envelope, updateErr := portalCall(nodeCtx, target.BaseURL, target.APIKey, http.MethodPost, "/users/update", attrs)
+				err = updateErr
+				if err == nil {
+					var result struct {
+						OK bool `json:"ok"`
+					}
+					if json.Unmarshal(envelope.Data, &result) != nil || !result.OK {
+						err = errors.New("节点未确认属性同步")
+					}
+				}
+				// 读回核对到期时间，防止门户静默钳制或忽略属性变更导致谎报成功。
+				if err == nil {
+					if verifyErr := verifySyncedAccountAttributes(nodeCtx, target, j.userID, rec); verifyErr != nil {
+						err = verifyErr
+					}
+				}
+			}
+			if err != nil {
+				r.err = err.Error()
+			}
+			results[i] = r
+		}(i, j)
+	}
+	wg.Wait()
+	return collectSubscriptionStatusResults(results)
 }
 
 // verifySyncedAccountAttributes 读回 /users/get，比对这次同步真正要改的字段。

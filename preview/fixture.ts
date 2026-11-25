@@ -56,6 +56,7 @@ export function createFixture(scenario: PreviewScenario = 'abnormal', now = Date
     cpu_percent: i === 4 ? 0 : [18, 37, 61, 25, 0, 9, 44, 0, 21, 16, 32, 14, 48][i],
     memory_percent: i === 4 ? 0 : 23 + i * 4, disk_percent: i === 4 ? 0 : 32 + i * 3,
     load_average: i === 4 ? '' : '0.32 0.41 0.29',
+    metrics_sampled_at: i === 4 ? undefined : checkedAt,
     net_latency_ms: latency, net_latency_checked_at: checkedAt,
     ssh_handshake_ms: i === 4 ? null : latency + 36,
     tx_bytes_24h: i === 7 ? 0 : Math.round((13 - i) * 4.7 * GiB),
@@ -69,28 +70,30 @@ export function createFixture(scenario: PreviewScenario = 'abnormal', now = Date
       status_source: 'api', net_latency_ms: null, ssh_handshake_ms: null,
       net_latency_checked_at: new Date(now - 42 * 60_000).toISOString(),
       cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '',
+      metrics_sampled_at: undefined,
       users_count: -1, speedtest: null, tx_bytes_24h: 0, rx_bytes_24h: 0,
     })
     Object.assign(nodes[7], {
       node_status: 'unknown', status_source: '', users_count: -1,
       net_latency_ms: null, net_latency_checked_at: null, ssh_handshake_ms: null,
-      cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '', speedtest: null,
+      cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '', metrics_sampled_at: undefined, speedtest: null,
     })
     // online + unauthorized 不是离线；API 不提供资源指标，数值 0 不应显示成空闲。
     Object.assign(nodes[8], {
       status_source: 'api', node_status_error: 'unauthorized', users_count: -1,
       cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '',
+      metrics_sampled_at: undefined,
       ssh_handshake_ms: null, speedtest: null,
     })
     Object.assign(nodes[10], {
       status_source: 'api', server_status: 'warning',
       server_status_error: 'SSH 凭据失效: unable to authenticate',
-      cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '', ssh_handshake_ms: null,
+      cpu_percent: 0, memory_percent: 0, disk_percent: 0, load_average: '', metrics_sampled_at: undefined, ssh_handshake_ms: null,
     })
     Object.assign(nodes[11], {
       node_status: 'unknown', status_source: 'api', node_status_error: '节点 API 密钥解密失败',
       users_count: -1, cpu_percent: 0, memory_percent: 0, disk_percent: 0,
-      load_average: '', ssh_handshake_ms: null, speedtest: null,
+      load_average: '', metrics_sampled_at: undefined, ssh_handshake_ms: null, speedtest: null,
     })
     const partial = nodes[2].speedtest!
     partial.targets.filter((t) => t.carrier === 'mobile').forEach((t) => {
@@ -112,6 +115,7 @@ export function createFixture(scenario: PreviewScenario = 'abnormal', now = Date
     region: n.region, provider: n.provider, tags: ['本地示例'], status: n.server_status,
     created_at: checkedAt, updated_at: checkedAt, cpu_percent: n.cpu_percent,
     memory_percent: n.memory_percent, disk_percent: n.disk_percent,
+    metrics_sampled_at: n.metrics_sampled_at ?? null,
     tx_bytes_24h: n.tx_bytes_24h, rx_bytes_24h: n.rx_bytes_24h,
     measured_bytes_24h: n.status_source === 'ssh' ? n.tx_bytes_24h + n.rx_bytes_24h : 0,
     portal_bytes_24h: n.status_source === 'api' ? n.tx_bytes_24h : 0,
@@ -132,6 +136,7 @@ export function createFixture(scenario: PreviewScenario = 'abnormal', now = Date
     id: `preview-alert-${n.node_id}`, type: n.node_status === 'offline' ? 'node_offline' : 'node_unstable',
     severity: n.node_status === 'offline' ? 'critical' : 'warning', status: 'open',
     server_name: n.server_name, host: n.host, node_name: n.node_name, node_port: n.listen_port,
+    node_id: n.node_id,
     message: `示例：${n.node_status === 'offline' ? '节点不可达' : '连续多轮探测未成功'}`,
     resolved_at: null, first_seen_at: checkedAt, last_seen_at: checkedAt,
   }))
@@ -221,6 +226,32 @@ export function createPreviewFetch(
     if (path === '/api/monitoring/nodes') return scenario === 'error'
       ? json({ error: '本地示例：监控读取失败，请切换场景重试', mock: true }, 503)
       : json(fixture.monitoring)
+    const qualityMatch = path.match(/^\/api\/monitoring\/nodes\/([^/]+)\/quality$/)
+    if (qualityMatch) {
+      const range = url.searchParams.get('range') || '24h'
+      const bucketSeconds = range === '30d' ? 21600 : range === '7d' ? 3600 : 1800
+      const nowMs = Date.now()
+      const pointsCount = 12
+      const series = (
+        [
+          ['telecom', '电信', 48, 0.8],
+          ['unicom', '联通', 62, 1.4],
+          ['mobile', '移动', 55, 1.1],
+        ] as const
+      ).map(([carrier, label, baseMs, baseLoss]) => ({
+        carrier,
+        label,
+        avg_ms: baseMs,
+        p95_ms: baseMs + 14,
+        loss_pct: baseLoss,
+        points: Array.from({ length: pointsCount }, (_, idx) => ({
+          t: new Date(nowMs - (pointsCount - 1 - idx) * bucketSeconds * 1000).toISOString(),
+          avg_ms: baseMs + ((idx * 5) % 13) - 4,
+          loss_pct: Math.max(0, Number((baseLoss + (idx % 3) * 0.4 - 0.4).toFixed(1))),
+        })),
+      }))
+      return json({ range, bucket_seconds: bucketSeconds, series })
+    }
     const statusMatch = path.match(/^\/api\/nodes\/([^/]+)\/portal-status$/)
     if (statusMatch) {
       const unsupported = { state: 'unsupported', error: '本地示例未提供该能力' }
@@ -246,6 +277,7 @@ export function createPreviewFetch(
     }
     const reads: Record<string, unknown> = {
       '/api/health': { status: 'ok', time: new Date().toISOString() },
+      '/api/login/config': { turnstile_site_key: '', service_email: '' },
       '/api/servers': fixture.servers, '/api/nodes': fixture.hy2Nodes,
       '/api/nodes/capabilities': {
         // 三种 VLESS Encryption 状态各给一台，便于浏览器验收：

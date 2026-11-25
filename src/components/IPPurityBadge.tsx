@@ -70,16 +70,26 @@ let sharedList: Promise<Map<string, IPPurityState>> | null = null
 
 function loadPurityState(nodeId: string): Promise<IPPurityState | null> {
   if (!sharedList) {
-    sharedList = api.ipPurityList().then((list) => new Map(list.items.map((it): [string, IPPurityState] => [
+    const current = api.ipPurityList().then((list) => new Map((list.items ?? []).map((it): [string, IPPurityState] => [
       it.node_id,
       it.checked && it.purity
         ? { checked: true, purity: it.purity }
         : { checked: false, ip: it.host, reason: it.reason ?? '' },
     ])))
-    const current = sharedList
-    current.catch(() => undefined).finally(() => window.setTimeout(() => { if (sharedList === current) sharedList = null }, 3000))
+    sharedList = current
+    // 成功结果缓存 3 秒防同屏 N+1；若本次请求失败则立即失效，避免 3 秒内后续重试连环复用失败 Promise。
+    current.then(
+      () => { window.setTimeout(() => { if (sharedList === current) sharedList = null }, 3000) },
+      () => { if (sharedList === current) sharedList = null },
+    )
   }
   return sharedList.then((m) => m.get(nodeId) ?? null)
+}
+
+function formatCheckedAt(iso: string | null | undefined): string {
+  if (!iso) return '从未成功检测'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '检测时间未知' : `检测于 ${d.toLocaleString('zh-CN', { hour12: false })}`
 }
 
 export function IPPurityBadge({ nodeId, nodeName, readOnly, notify }: Props) {
@@ -123,34 +133,49 @@ export function IPPurityBadge({ nodeId, nodeName, readOnly, notify }: Props) {
     }
   }, [open])
 
+  const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     try {
       // 列表接口里没有这个节点（刚接入等）时退回单节点接口。
-      setState((await loadPurityState(nodeId)) ?? await api.ipPurity(nodeId))
+      const next = (await loadPurityState(nodeId)) ?? await api.ipPurity(nodeId)
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setState(next)
     } catch {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       // 读取失败不打扰用户（列表里几十个徽标，弹几十个错误是噪音），
       // 显示成"未知"即可；真正要看原因时点开详情会触发一次刷新。
       setState(null)
     } finally {
-      setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
   }, [nodeId])
 
   useEffect(() => {
+    mountedRef.current = true
     void load()
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
   }, [load])
 
   async function refresh(forceApi: boolean) {
+    if (refreshing) return
     setRefreshing(true)
     try {
       const result = await api.refreshIPPurity(nodeId, forceApi)
+      if (!mountedRef.current) return
       setState({ checked: true, purity: result.purity })
       notify(`${nodeName} 的 IP 纯净度已更新`, 'info')
     } catch (error) {
+      if (!mountedRef.current) return
       notify(error instanceof Error ? error.message : 'IP 纯净度检测失败', 'error')
     } finally {
-      setRefreshing(false)
+      if (mountedRef.current) setRefreshing(false)
     }
   }
 
@@ -220,7 +245,7 @@ export function IPPurityBadge({ nodeId, nodeName, readOnly, notify }: Props) {
 
           <div className="ip-purity-foot">
             <span>来源 {p.source === 'offline' ? '离线判定' : p.source === 'api' ? '第三方 API' : p.source || '—'}</span>
-            <span>{p.checked_at ? `检测于 ${new Date(p.checked_at).toLocaleString('zh-CN', { hour12: false })}` : '从未成功检测'}</span>
+            <span>{formatCheckedAt(p.checked_at)}</span>
           </div>
           {p.error && <p className="ip-purity-error">上次检测失败：{p.error}（下面显示的是更早一次成功的结果）</p>}
           <p className="ip-purity-note">「未判定」表示数据源没有给出该字段，不等同于「否」。</p>

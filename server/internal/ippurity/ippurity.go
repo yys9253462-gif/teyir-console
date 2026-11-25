@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"nodeops/server/internal/portaltls"
 	"strings"
 	"sync"
 	"time"
@@ -120,12 +121,16 @@ func newSafeClient() *http.Client {
 				if err != nil {
 					return nil, fmt.Errorf("解析 %s 失败: %w", host, err)
 				}
+				if len(ips) == 0 {
+					return nil, fmt.Errorf("%s 没有解析到任何地址", host)
+				}
 				for _, ip := range ips {
-					if !ip.IP.IsGlobalUnicast() || ip.IP.IsPrivate() || ip.IP.IsLinkLocalUnicast() || ip.IP.IsLinkLocalMulticast() {
+					// 统一经由 portaltls.PublicIP 复核，封堵运营商级 NAT、NAT64 及保留段旁路。
+					if !portaltls.PublicIP(ip.IP) {
 						return nil, fmt.Errorf("%s 解析到非公网地址，已拒绝访问", host)
 					}
 				}
-				return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+				return portaltls.DialCheckedIPs(ctx, dialer, network, port, ips)
 			},
 		},
 	}
@@ -154,11 +159,7 @@ func IsPublicIP(raw string) bool {
 	if ip == nil {
 		return false
 	}
-	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return false
-	}
-	if !ip.IsGlobalUnicast() {
+	if !portaltls.PublicIP(ip) || ip.IsMulticast() {
 		return false
 	}
 	if reservedForDocumentation(ip) {

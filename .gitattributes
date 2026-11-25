@@ -110,6 +110,8 @@ Caddyfile* text eol=lf
 *.txt text eol=lf
 .gitignore text eol=lf
 .gitattributes text eol=lf
+.dockerignore text eol=lf
+LICENSE text eol=lf
 
 # 二进制，不要碰
 *.png binary

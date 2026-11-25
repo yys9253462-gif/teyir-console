@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -79,18 +80,24 @@ var portalBundleHTTPClient = &http.Client{
 	},
 }
 
-var portalInstallerRepoPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`)
+var portalRepoSegmentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$`)
 
-// portalInstallerRepo 读取节点门户更新来源仓库（格式 owner/repo），未配置时拒绝执行避免请求无效上游。
+// portalInstallerRepo 读取节点门户更新来源仓库（格式 owner/repo），拆段严格校验防路径穿越。
 func portalInstallerRepo() (string, error) {
 	repo := strings.TrimSpace(os.Getenv("HY2_INSTALLER_REPO"))
 	if repo == "" {
 		return "", errors.New("未配置节点门户更新仓库，请设置环境变量 HY2_INSTALLER_REPO（格式如 owner/hysteria2-installer）")
 	}
-	if !portalInstallerRepoPattern.MatchString(repo) || strings.Contains(repo, "..") {
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 {
 		return "", errors.New("环境变量 HY2_INSTALLER_REPO 格式不合法，应为 owner/repo")
 	}
-	return repo, nil
+	for _, seg := range parts {
+		if !portalRepoSegmentPattern.MatchString(seg) || strings.Contains(seg, "..") || strings.HasSuffix(seg, ".") {
+			return "", errors.New("环境变量 HY2_INSTALLER_REPO 格式不合法，应为 owner/repo")
+		}
+	}
+	return parts[0] + "/" + parts[1], nil
 }
 
 // 指纹和下载固定同一个不可变提交，不能一边比快照一边下载 main。
@@ -295,6 +302,17 @@ func portalBatchBudget(nodes int) time.Duration {
 }
 
 func (s *Server) runPortalBatch(b portalBatch) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			if s.logger != nil {
+				s.logger.Error("portal batch panic", "batch_id", b.ID, "panic", rec, "stack", string(debug.Stack()))
+			}
+			b.Status = "interrupted"
+			saveCtx, saveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = s.savePortalBatchRetry(saveCtx, &b)
+			saveCancel()
+		}
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), portalBatchBudget(len(b.Results)))
 	defer cancel()
 	// 独立心跳避免长下载被误判过期；退出时停止，数据库故障后最多等一个租约。
@@ -381,7 +399,10 @@ func verifyPortalBundle(bundle portalBundle, expected map[string]string) error {
 }
 
 func (s *Server) updatePortalBatchNode(ctx context.Context, item *portalBatchItem, expected map[string]string, progress func(string) error) error {
-	unlock := s.lockNodeWrite(item.NodeID)
+	unlock, err := s.lockNodeWriteCtx(ctx, item.NodeID)
+	if err != nil {
+		return fmt.Errorf("等待节点写锁失败：%w", err)
+	}
 	defer unlock()
 	target, err := s.loadPortalWebTarget(ctx, item.NodeID)
 	if err != nil {

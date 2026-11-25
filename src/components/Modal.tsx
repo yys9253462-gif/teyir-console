@@ -5,6 +5,11 @@ import { X } from 'lucide-react'
 const modalStack: symbol[] = []
 let savedBodyOverflow: string | null = null
 
+// 供外层抽屉判断是否存在打开中的弹窗，避免按 Esc 键时同时穿透关闭下层抽屉。
+export function hasOpenModal(): boolean {
+  return modalStack.length > 0
+}
+
 export function Modal({ title, kicker, children, onClose, wide }: { title: string; kicker?: string; children: React.ReactNode; onClose: () => void; wide?: boolean }) {
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
@@ -19,6 +24,8 @@ export function Modal({ title, kicker, children, onClose, wide }: { title: strin
 
     function onKey(event: KeyboardEvent) {
       if (event.key === 'Escape' && modalStack[modalStack.length - 1] === id) {
+        event.preventDefault()
+        event.stopPropagation()
         onCloseRef.current()
       }
     }

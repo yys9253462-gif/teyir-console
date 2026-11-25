@@ -45,7 +45,7 @@ func (b *Box) Seal(plaintext []byte) ([]byte, error) {
 }
 
 func (b *Box) Open(ciphertext []byte) ([]byte, error) {
-	if len(ciphertext) < b.aead.NonceSize() {
+	if len(ciphertext) < b.aead.NonceSize()+b.aead.Overhead() {
 		return nil, errors.New("ciphertext too short")
 	}
 	nonce, body := ciphertext[:b.aead.NonceSize()], ciphertext[b.aead.NonceSize():]

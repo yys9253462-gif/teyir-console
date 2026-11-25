@@ -4,7 +4,7 @@ import { askConfirm } from './ConfirmHost'
 import { api, isAdminSession, type SubscriptionFormat, type SubscriptionState } from '../lib/api'
 import { copyToClipboard } from '../lib/clipboard'
 import { useCopiedFlash } from '../lib/copiedFlash'
-import { Modal } from './Modal'
+import { safeHttpUrl } from '../lib/safeUrl'
 
 // SubscriptionPanel exposes the merged subscription: one link carrying every
 // registered node, so a client imports it once and gets the whole fleet.
@@ -38,16 +38,30 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
   const previewRequest = useRef(0)
   const [previewLoading, setPreviewLoading] = useState(false)
 
+  const loadSeq = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     try {
-      setState(await api.subscriptionState())
+      const next = await api.subscriptionState()
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setState(next)
       setNote(null)
     } catch (err) {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       setState(null)
       setNote(err instanceof Error ? `读取订阅失败：${err.message}` : '读取订阅失败')
     } finally {
-      setLoading(false)
+      if (mountedRef.current && seq === loadSeq.current) setLoading(false)
     }
   }, [])
 
@@ -99,15 +113,15 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
       await api.rotateSubscription()
       // 2026-11-12：换新只换链接令牌，各节点上的账号口令不变。原文案「旧链接立即失效」会让人以为外流的配置也失效了。
       notify('已换新订阅链接，旧链接不能再拉取；已导入的配置仍可连接')
-      setRotating(false)
+      if (mountedRef.current) setRotating(false)
       await load()
       // 2026-11-06：预览框里还是旧 token 生成的配置（引用旧链接）。不刷新的话，
       // 运维点「复制内容」复制走的是刚失效的那条链接 —— 客户导入后 404。
-      await loadPreview(format)
+      if (mountedRef.current) await loadPreview(format)
     } catch (err) {
       notify(err instanceof Error ? `换新失败：${err.message}` : '换新失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -131,7 +145,7 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
     } catch (err) {
       notify(err instanceof Error ? `操作失败：${err.message}` : '操作失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -169,9 +183,11 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
             <button className="button button-primary button-compact" onClick={() => void copy('订阅链接', state.url)}>
               {copied === '订阅链接' ? <Check size={13} /> : <Copy size={13} />}复制
             </button>
-            <a className="button button-quiet button-compact" href={state.url} target="_blank" rel="noreferrer">
-              <ExternalLink size={13} />打开
-            </a>
+            {safeHttpUrl(state.url) && (
+              <a className="button button-quiet button-compact" href={safeHttpUrl(state.url)} target="_blank" rel="noreferrer noopener">
+                <ExternalLink size={13} />打开
+              </a>
+            )}
           </div>
 
           <div className="sub-meta-row">
@@ -191,13 +207,13 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
           </div>
 
           <div className="sub-counts">
-            <span className="status-pill online">已包含 {state.included.length} 个节点</span>
-            {state.excluded.length > 0 && <span className="status-pill warning">排除 {state.excluded.length} 个</span>}
+            <span className="status-pill online">已包含 {(state.included ?? []).length} 个节点</span>
+            {(state.excluded ?? []).length > 0 && <span className="status-pill warning">排除 {(state.excluded ?? []).length} 个</span>}
           </div>
 
-          {state.included.length > 0 && (
+          {(state.included ?? []).length > 0 && (
             <div className="sub-node-list">
-              {state.included.map((node) => (
+              {(state.included ?? []).map((node) => (
                 <span className="sub-node-chip" key={node.id} title={`${node.host}:${node.port} · SNI ${node.sni}`}>
                   {node.name}
                   <small>{node.host}:{node.port}</small>
@@ -206,10 +222,10 @@ export function SubscriptionPanel({ notify }: { notify: (message: string) => voi
             </div>
           )}
 
-          {state.excluded.length > 0 && (
+          {(state.excluded ?? []).length > 0 && (
             <div className="sub-excluded">
               <strong>未纳入的节点</strong>
-              {state.excluded.map((node) => (
+              {(state.excluded ?? []).map((node) => (
                 <div className="sub-excluded-row" key={node.node_id}>
                   <span>{node.name}</span>
                   <small className="service-error">{node.reason}</small>

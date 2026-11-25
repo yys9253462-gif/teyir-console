@@ -673,6 +673,7 @@ INSERT INTO hysteria_nodes(id,name,api_url,api_key,server_id,in_store) VALUES('`
 	s.writeLimiter = newSlidingLimiter(time.Minute, 100)
 	call := func() int {
 		req := httptest.NewRequest(http.MethodPatch, "/api/nodes/x", strings.NewReader(`{"in_store":true}`))
+		req = req.WithContext(context.WithValue(req.Context(), claimsKey, auth.Claims{Subject: adminA, Role: "admin"}))
 		req.SetPathValue("id", fixNode)
 		rec := httptest.NewRecorder()
 		s.updateNode(rec, req)
@@ -791,6 +792,7 @@ INSERT INTO hysteria_nodes(id,name,api_url,api_key,server_id,in_store,listen_por
 	call := func(body string) {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPatch, "/api/nodes/x", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), claimsKey, auth.Claims{Subject: adminA, Role: "admin"}))
 		req.SetPathValue("id", fixNode)
 		rec := httptest.NewRecorder()
 		s.updateNode(rec, req)

@@ -15,7 +15,8 @@ import shutil
 import sys
 import time
 
-TARGET = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else "/etc/hysteria/portal.py"
+_POSITIONAL = [a for a in sys.argv[1:] if not a.startswith("-")]
+TARGET = _POSITIONAL[0] if _POSITIONAL else "/etc/hysteria/portal.py"
 MARKER = "'online_ips': ["
 EXPECTED = 2
 
@@ -74,7 +75,7 @@ def main() -> int:
     backup = "%s.bak-onlineip-get-%s" % (TARGET, stamp)
     shutil.copy2(TARGET, backup)
     tmp = "%s.tmp-onlineip-get" % TARGET
-    with io.open(tmp, "w", encoding="utf-8") as fh:
+    with io.open(tmp, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(out)
     shutil.copymode(TARGET, tmp)
     os.replace(tmp, TARGET)

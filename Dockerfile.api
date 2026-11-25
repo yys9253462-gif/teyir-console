@@ -1,9 +1,23 @@
+# 后端多阶段构建镜像：分离编译层与非特权运行层，并预编译数据库迁移器。
 FROM golang:1.26.11-alpine AS build
 WORKDIR /src
-COPY go.mod go.sum ./
-COPY server ./server
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./server/cmd/api
 
+# 先拷贝依赖清单并拉取模块，避免业务代码变更击穿构建缓存。
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY server ./server
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/api ./server/cmd/api \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/migrate ./server/cmd/migrate
+
+# 独立非特权迁移器镜像：不再在运行期依赖完整 Go 工具链与 root 权限。
+FROM gcr.io/distroless/static-debian12:nonroot AS migrate
+WORKDIR /src
+COPY --from=build /out/migrate /migrate
+COPY --from=build /src/server/migrations /src/server/migrations
+ENTRYPOINT ["/migrate"]
+
+# 默认目标：精简非特权接口服务镜像。
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/api /api
 EXPOSE 8080

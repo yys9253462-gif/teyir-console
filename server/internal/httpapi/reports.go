@@ -86,6 +86,7 @@ func (s *Server) setSubscriptionRevenue(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "月收入需在 0-1000000 之间"})
 		return
 	}
+	in.Currency = strings.ToUpper(strings.TrimSpace(in.Currency))
 	if in.Currency == "" {
 		in.Currency = "CNY"
 	}

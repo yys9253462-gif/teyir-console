@@ -25,9 +25,9 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
-API = f"http://127.0.0.1:{os.environ.get('API_PORT', '8081')}"
-NODE_OK = os.environ.get("NODE_ID", "27de1727-1f07-4881-b183-45a5ad03e976")
-NODE_BARE = os.environ.get("BARE_NODE_ID", "c862a58d-6df3-4c51-be69-dae4696c6fa5")
+API = f"http://127.0.0.1:{os.environ.get('API_PORT', '8080')}"
+NODE_OK = os.environ.get("NODE_ID", "00000000-0000-0000-0000-000000000001")
+NODE_BARE = os.environ.get("BARE_NODE_ID", "00000000-0000-0000-0000-000000000002")
 
 results = []
 round_no = 0

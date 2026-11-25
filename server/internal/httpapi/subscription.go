@@ -838,7 +838,7 @@ ORDER BY created_at ASC, id ASC`)
 }
 
 // subscriptionRebuildTimeout 同步重建的上限：与后台刷新一致。单节点探测另有 12 秒上限。
-const subscriptionRebuildTimeout = 60 * time.Second
+var subscriptionRebuildTimeout = 60 * time.Second
 
 // rebuildSubscription 并发查询所有节点、生成订阅构建结果并写入缓存。
 func (s *Server) rebuildSubscription(ctx context.Context, candidates []subscriptionCandidate, cacheKey string) *subscriptionBuild {
@@ -1846,21 +1846,10 @@ LIMIT 1`).
 // set, so this yields the address the operator should actually paste into a
 // client. Only the path is authoritative on the server side.
 func subscriptionPublicURL(r *http.Request, token string) string {
-	if v := deliveryBaseOverride(); v != "" {
-		return v + "/sub/" + token
+	if base := subscriptionBaseURL(r); base != "" {
+		return base + "/sub/" + token
 	}
-	scheme := "http"
-	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
-		scheme = "https"
-	}
-	host := r.Host
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
-		host = forwarded
-	}
-	if host == "" {
-		return "/sub/" + token
-	}
-	return scheme + "://" + host + "/sub/" + token
+	return "/sub/" + token
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,7 +2074,7 @@ func (s *Server) updateSubscription(w http.ResponseWriter, r *http.Request) {
 		resp["node_state_failed"] = outcome.Failed
 		if active {
 			s.cancelPendingNodeAction(r.Context(), rec.ID)
-			if !outcome.allOK() && !outcome.onlyGone() {
+			if len(rec.nodeAccounts) == 0 || (!outcome.allOK() && !outcome.onlyGone()) {
 				if err := s.queueSubscriptionSyncBounded(r.Context(), rec.ID); err != nil {
 					resp["node_state_message"] = fmt.Sprint(resp["node_state_message"]) + "。后台自动重试登记失败，请稍后重新启用一次"
 				}

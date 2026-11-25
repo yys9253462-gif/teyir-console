@@ -9,6 +9,7 @@ import { api, loadSession, type Hy2Node, type ManagedSubscription, type NodeCate
 import { copyToClipboard } from '../lib/clipboard'
 import { useCopiedFlash } from '../lib/copiedFlash'
 import { formatBytes } from '../lib/format'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
 
@@ -98,9 +99,10 @@ function humanLabel(label: string): string {
 // 这类布局里误点一次就是「客户立即断网」或「数据不可恢复」。
 // 现在外面只留日常操作（复制 / 启停 / 编辑），这四项收进菜单，
 // 且每项都带一行说明讲清后果。
-function RowMenu({ item, busy, onCopySubscription, onResetIPs, onReconcile, onRotate, onDelete }: {
+function RowMenu({ item, busy, readOnlyHint, onCopySubscription, onResetIPs, onReconcile, onRotate, onDelete }: {
   item: ManagedSubscription
   busy: boolean
+  readOnlyHint?: string
   onCopySubscription: () => void
   onResetIPs: () => void
   /** 账号对账：把确定性密码重新下发到各节点。幂等、无副作用。 */
@@ -121,6 +123,26 @@ function RowMenu({ item, busy, onCopySubscription, onResetIPs, onReconcile, onRo
   // 「更多」是低频点击，这点开销无所谓；而**看不见菜单项**是不可接受的。
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
   const btnRef = useRef<HTMLButtonElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const close = () => setOpen(false)
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        setOpen(false)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [open])
 
   function toggleMenu() {
     if (open) { setOpen(false); return }
@@ -184,22 +206,22 @@ function RowMenu({ item, busy, onCopySubscription, onResetIPs, onReconcile, onRo
               // 两种都不能把按钮变成无解释的灰。当前采集失败时给一个明确的提示，
               // 仍可点击；真的 0 台时允许点（后端会照常清空并记账）。
               disabled={busy}
-              title={item.active_ip_count === 0
+              title={readOnlyHint ?? (item.active_ip_count === 0
                 ? (item.current_online_ips_complete === false
                   ? '当前未读到在线 IP（采集异常/未知），仍可清空历史记录'
                   : '当前没有记录到在线 IP；清空会重置计数，客户无需重装')
-                : '只重置计数，客户无需重装'}
+                : '只重置计数，客户无需重装')}
               onClick={() => { setOpen(false); onResetIPs() }}
             >
               <MonitorSmartphone size={14} /><span><strong>清空网络记录</strong><small>只重置计数，客户无需重装</small></span>
             </button>
-            <button role="menuitem" disabled={busy} onClick={() => { setOpen(false); onReconcile() }}>
+            <button role="menuitem" disabled={busy} title={readOnlyHint} onClick={() => { setOpen(false); onReconcile() }}>
               <Wrench size={14} /><span><strong>账号对账</strong><small>把客户的密码重新下发到各节点；客户连不上时用</small></span>
             </button>
-            <button role="menuitem" disabled={busy || !isAdminSession()} onClick={() => { setOpen(false); onRotate() }}>
+            <button role="menuitem" disabled={busy || !isAdminSession()} title={readOnlyHint} onClick={() => { setOpen(false); onRotate() }}>
               <RotateCcw size={14} /><span><strong>换新链接</strong><small className="danger-note">旧链接立即失效，客户需重新导入</small></span>
             </button>
-            <button role="menuitem" disabled={busy || !isAdminSession()} onClick={() => { setOpen(false); onDelete() }}>
+            <button role="menuitem" disabled={busy || !isAdminSession()} title={readOnlyHint} onClick={() => { setOpen(false); onDelete() }}>
               <Trash2 size={14} /><span><strong>删除订阅</strong><small className="danger-note">不可恢复，且会注销节点上的账号</small></span>
             </button>
           </div>
@@ -320,7 +342,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
     } catch (err) {
       notify(err instanceof Error ? `操作失败：${err.message}` : '操作失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -333,7 +355,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
     } catch (err) {
       notify(err instanceof Error ? `重置失败：${err.message}` : '重置失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -364,7 +386,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
     } catch (err) {
       notify(err instanceof Error ? `对账失败：${err.message}` : '对账失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -389,7 +411,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
     } catch (err) {
       notify(err instanceof Error ? err.message : '全量对账失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -401,17 +423,19 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
     try {
       const result = await api.rotateSubscriptionRecord(target.id)
       notify(`已换新链接：${target.label}，旧链接立即失效，请把新链接发给客户`)
-      setFreshKey('')
-      // 网络往返之后浏览器常常不再允许写剪贴板，失败提示会盖掉「已换新」；
-      // 所以把新链接放进弹窗，由运营自己点复制。
-      setRotated({ label: target.label, url: result.subscription_url })
+      if (mounted.current) {
+        setFreshKey('')
+        // 网络往返之后浏览器常常不再允许写剪贴板，失败提示会盖掉「已换新」；
+        // 所以把新链接放进弹窗，由运营自己点复制。
+        setRotated({ label: target.label, url: result.subscription_url })
+      }
       // The rotate response intentionally omits `enabled`, so patch nothing and
       // re-read the list instead of guessing at the new state.
       await load()
     } catch (err) {
       notify(err instanceof Error ? `换新失败：${err.message}` : '换新失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -429,23 +453,25 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
       // 节点回收不完整时后端已把订阅停用，刷新让列表反映真实状态。
       await load()
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
   async function rotateKey() {
-    if (!rotatingKey) return
+    if (!rotatingKey || readOnly) return
     setBusy(true)
     try {
       const result = await api.rotateStoreKey()
-      setFreshKey(result.key)
-      setRotatingKey(false)
+      if (mounted.current) {
+        setFreshKey(result.key)
+        setRotatingKey(false)
+      }
       notify('已生成新的对接密钥，旧密钥立即失效，请同步更新商城配置')
       await load()
     } catch (err) {
       notify(err instanceof Error ? `生成失败：${err.message}` : '生成失败')
     } finally {
-      setBusy(false)
+      if (mounted.current) setBusy(false)
     }
   }
 
@@ -498,8 +524,8 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
       {note && <div className="api-error-banner" role="alert"><AlertTriangle size={16} />{note}</div>}
 
       {/* 搜索 + 分页控件放在表格上方（不是下方）—— 300 条记录时，
-          翻到第 12 页想找东西，控件在屏幕外根本看不见。 */}
-      {subscriptions.length > PAGE_SIZE && (
+          翻到第 12 页想找东西，控件在屏幕外根本看不见；若列表缩回一页内但搜索词仍在，仍保持可见以便清空。 */}
+      {(subscriptions.length > PAGE_SIZE || query !== '') && (
         <div className="sub-toolbar">
           <label className="sub-search">
             <Search size={14} />
@@ -547,7 +573,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
               而不是点完收到一个错误。 */}
           <button
             className="button button-quiet"
-            disabled={readOnly || busy || subscriptions.length === 0}
+            disabled={readOnly || busy || subscriptions.length === 0 || subscriptions.length > 50}
             title={readOnly ? readOnlyHint : subscriptions.length > 50
               ? `订阅数为 ${subscriptions.length}，超过全量对账上限 50 —— 请用行内「账号对账」逐条处理`
               : '把全部订阅的确定性密码重新下发到各节点'}
@@ -564,6 +590,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
               <>
                 <strong>没有匹配的订阅</strong>
                 <span>搜索「<b>{query}</b>」没有命中任何记录，换个关键词或清空搜索框。</span>
+                <button type="button" className="button button-quiet button-compact" onClick={() => setQuery('')}>清空搜索</button>
               </>
             ) : (
               <>
@@ -660,7 +687,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
                     {(item.online_ips ?? []).length > 0 && <details><summary>最近鉴权记录（非当前在线）</summary>
                       {(item.online_ips ?? []).map(entry => <div key={`${entry.node_id}-${entry.ip}`}>{entry.ip} · {entry.node_name}</div>)}
                     </details>}
-                    {item.active_ips.length > 0 && <span className="traffic-sub" title={item.active_ips.map(entry => entry.ip).join('、')}>拉取过订阅：{item.active_ips.length} 个地址（非当前在线）</span>}
+                    {(item.active_ips ?? []).length > 0 && <span className="traffic-sub" title={(item.active_ips ?? []).map(entry => entry.ip).join('、')}>拉取过订阅：{(item.active_ips ?? []).length} 个地址（非当前在线）</span>}
                   </td>
                   <td><span className="traffic-value">{item.access_count}</span></td>
                   <td><span className="traffic-sub">{item.last_accessed_at ? formatDate(item.last_accessed_at) : '从未'}</span></td>
@@ -710,6 +737,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
                       <RowMenu
                         item={item}
                         busy={readOnly || busy}
+                        readOnlyHint={readOnly ? readOnlyHint : undefined}
                         onCopySubscription={() => void copy('订阅链接', item.subscription_url)}
                         onResetIPs={() => void resetIPs(item)}
                         onReconcile={() => void reconcile(item)}
@@ -797,7 +825,13 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
                 <div className="section-kicker">MALL INTEGRATION <span>·</span> {store.enabled ? 'READY' : 'NOT CONFIGURED'}</div>
                 <h2>商城对接 <span className={`status-pill ${store.enabled ? 'online' : 'warning'}`}>{store.enabled ? '已配置密钥' : '未生成密钥'}</span></h2>
               </div>
-              <button className={`button ${rotatingKey ? 'button-danger' : 'button-quiet'}`} disabled={busy} onClick={() => (rotatingKey ? void rotateKey() : setRotatingKey(true))} onBlur={() => setRotatingKey(false)}>
+              <button
+                className={`button ${rotatingKey ? 'button-danger' : 'button-quiet'}`}
+                disabled={readOnly || busy}
+                title={readOnly ? readOnlyHint : undefined}
+                onClick={() => (rotatingKey ? void rotateKey() : setRotatingKey(true))}
+                onBlur={() => setRotatingKey(false)}
+              >
                 <KeyRound size={15} />{rotatingKey ? '确认生成？旧密钥立即失效' : store.enabled ? '重新生成密钥' : '生成对接密钥'}
               </button>
             </div>
@@ -1202,7 +1236,9 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
           )}
 
           <div className="modal-actions">
-            <a className="button button-quiet" href={created.delivery_url} target="_blank" rel="noreferrer"><ExternalLink size={14} />预览交付页</a>
+            {safeHttpUrl(created.delivery_url) && (
+              <a className="button button-quiet" href={safeHttpUrl(created.delivery_url)} target="_blank" rel="noreferrer noopener"><ExternalLink size={14} />预览交付页</a>
+            )}
             <button className="button button-primary" onClick={onClose}>完成</button>
           </div>
         </div>

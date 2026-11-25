@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"runtime/debug"
 	"time"
 )
 
@@ -198,39 +199,49 @@ func (s *Server) StartHostJobJournal(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
+		tick := func() {
+			defer func() {
+				if rec := recover(); rec != nil && s.logger != nil {
+					s.logger.Error("host job journal panic", "panic", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			installJobs.mu.Lock()
+			defer installJobs.mu.Unlock()
+			if installJobs.db != nil {
+				installJobs.retryUnsavedLocked()
+				for id := range installJobs.owned {
+					if j := installJobs.jobs[id]; j != nil && j.Status == "running" {
+						// 2026-11-04：带超时。这里持有全局任务锁，与 persistLocked 一样限 5 秒。
+						hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+						if _, err := installJobs.db.Exec(hbCtx, `UPDATE host_operation_jobs SET heartbeat=now() WHERE id=$1 AND owner=$2 AND status='running'`, id, installJobs.owner); err != nil {
+							s.logger.Warn("host job heartbeat failed", "job", id, "error", err)
+						}
+						cancel()
+					}
+				}
+				if err := installJobs.restoreLocked(ctx); err != nil {
+					installJobs.ready = false
+					s.logger.Warn("host task recovery unavailable", "error", err)
+				} else {
+					installJobs.ready = true
+				}
+			}
+		}
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				installJobs.mu.Lock()
-				if installJobs.db != nil {
-					installJobs.retryUnsavedLocked()
-					for id := range installJobs.owned {
-						if j := installJobs.jobs[id]; j != nil && j.Status == "running" {
-							// 2026-11-04：带超时。这里持有全局任务锁：原来用不带截止时间的 ctx，
-							// 库卡住时整把锁一直挂着 —— 所有安装 / 迁移的日志写入、任务查询、
-							// 换 IP 前的「主机是否有任务」检查全部阻塞。与 persistLocked 一样限 5 秒。
-							hbCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-							if _, err := installJobs.db.Exec(hbCtx, `UPDATE host_operation_jobs SET heartbeat=now() WHERE id=$1 AND owner=$2 AND status='running'`, id, installJobs.owner); err != nil {
-								s.logger.Warn("host job heartbeat failed", "job", id, "error", err)
-							}
-							cancel()
-						}
-					}
-					if err := installJobs.restoreLocked(ctx); err != nil {
-						installJobs.ready = false
-						s.logger.Warn("host task recovery unavailable", "error", err)
-					} else {
-						installJobs.ready = true
-					}
-				}
-				installJobs.mu.Unlock()
+				tick()
 			}
 		}
 	}()
 }
 func (s *Server) resolveInstallJob(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceWriteLimit(w, claims.Subject) {
+		return
+	}
 	if r.Header.Get("X-Confirm-Dangerous") != "yes" {
 		writeJSON(w, 428, map[string]string{"error": "请确认远端安装/迁移进程确已停止，再解除任务互斥"})
 		return
@@ -262,16 +273,21 @@ func (s *Server) resolveInstallJob(w http.ResponseWriter, r *http.Request) {
 		s.databaseError(w, r, err)
 		return
 	}
+	serverID := job.ServerID
 	for _, sid := range job.Servers {
 		if installJobs.byServer[sid] == id {
 			delete(installJobs.byServer, sid)
 		}
 	}
 	installJobs.mu.Unlock()
-	s.audit(r.Context(), r, "resolve_interrupted_host_job", "server", job.ServerID, map[string]any{"job_id": id})
+	s.audit(r.Context(), r, "resolve_interrupted_host_job", "server", serverID, map[string]any{"job_id": id})
 	writeJSON(w, 200, map[string]string{"status": "resolved"})
 }
 func (s *Server) listInstallJobs(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceReadLimit(w, claims.Subject) {
+		return
+	}
 	rows, err := s.db.Query(r.Context(), `SELECT payload FROM host_operation_jobs ORDER BY updated_at DESC LIMIT 100`)
 	if err != nil {
 		s.databaseError(w, r, err)

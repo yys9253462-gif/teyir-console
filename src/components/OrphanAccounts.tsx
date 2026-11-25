@@ -30,12 +30,20 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
   // 2026-11-06：只采用最后一次请求的结果。切换「显示已解决」后，前一次较慢的响应原来会晚到并覆盖列表 ——
   // 勾着「显示已解决」却只看到未解决的，或反过来。
   const requestSeq = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      requestSeq.current += 1
+    }
+  }, [])
   const load = useCallback(async (withResolved: boolean) => {
     const seq = ++requestSeq.current
     setLoading(true)
     try {
       const res = await api.orphans(withResolved)
-      if (seq !== requestSeq.current) return
+      if (!mountedRef.current || seq !== requestSeq.current) return
       // ⚠️ 后端返回的是对象 {orphans, count, pending, note, how_it_happens}，
       // 不是数组。第一版按数组写会得到 undefined → 界面永远显示
       // "没有孤儿账号"（最糟的那种错：看着正常，其实把数据全吞了）。
@@ -43,12 +51,12 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
       setBackendNote(res?.note ?? '')
       setLoadError('')
     } catch (error) {
-      if (seq !== requestSeq.current) return
+      if (!mountedRef.current || seq !== requestSeq.current) return
       // 读不到不该让任务页崩 —— 但也绝不能显示成「清理干净了」（限流 429 / 数据库抖动时
       // 待补删的买家账号仍可在节点上使用）。保留上一次读到的列表，并说明这次没读到。
       setLoadError(error instanceof Error ? error.message : '读取失败')
     } finally {
-      if (seq === requestSeq.current) setLoading(false)
+      if (mountedRef.current && seq === requestSeq.current) setLoading(false)
     }
   }, [])
 
@@ -80,7 +88,7 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
     } catch (error) {
       notify(error instanceof Error ? error.message : '结案失败')
     } finally {
-      setBusy(null)
+      if (mountedRef.current) setBusy(null)
     }
   }
   const manual = pending.filter((o) => !o.has_credential)
@@ -97,8 +105,10 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
     } catch (error) {
       notify(error instanceof Error ? error.message : '标记失败')
     } finally {
-      await load(showResolved)
-      setBusy(null)
+      if (mountedRef.current) {
+        await load(showResolved)
+        if (mountedRef.current) setBusy(null)
+      }
     }
   }
 
@@ -112,7 +122,7 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
       notify(error instanceof Error ? error.message : '补删失败')
       await load(showResolved)
     } finally {
-      setBusy(null)
+      if (mountedRef.current) setBusy(null)
     }
   }
 

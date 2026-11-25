@@ -3,6 +3,7 @@ import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react'
 import { api, type InstallJob, type Server } from '../lib/api'
 import { pendingInstallJob, useInstallJobPolling } from '../lib/useInstallJobPolling'
 import { copyToClipboard } from '../lib/clipboard'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
 
@@ -41,6 +42,11 @@ export function InstallHy2Dialog({ server, onClose, onDone, notify }: {
   const [error, setError] = useState('')
   const [job, setJob] = useState<InstallJob | null>(null)
   const logRef = useRef<HTMLPreElement>(null)
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     let alive = true
@@ -77,12 +83,12 @@ export function InstallHy2Dialog({ server, onClose, onDone, notify }: {
 
   useEffect(() => {
     logRef.current?.scrollTo(0, logRef.current.scrollHeight)
-  }, [job?.log.length])
+  }, [(job?.log ?? []).length])
 
   async function start() {
     if (!await askConfirm(`在 ${server.name}（${server.host}）上安装 Hysteria 2？
 
-域名：${fullDomain}\n\n会执行官方安装脚本并重写 /etc/hysteria 下的配置；若这台机器已装过，门户凭据与用户会被保留。`)) return
+域名：${fullDomain}\n\n会执行环境变量 HY2_INSTALL_SCRIPT_URL 指定的节点安装脚本并重写 /etc/hysteria 下的配置；若这台机器已装过，门户凭据与用户会被保留。`)) return
     setStarting(true)
     setError('')
     try {
@@ -92,11 +98,11 @@ export function InstallHy2Dialog({ server, onClose, onDone, notify }: {
       })
       saveAcmeEmail(email.trim())
       if (useZones) saveLastZone(zone)
-      setJob(pendingInstallJob(job_id, server.id))
+      if (mountedRef.current) setJob(pendingInstallJob(job_id, server.id))
     } catch (err) {
-      setError(err instanceof Error ? err.message : '启动安装失败')
+      if (mountedRef.current) setError(err instanceof Error ? err.message : '启动安装失败')
     } finally {
-      setStarting(false)
+      if (mountedRef.current) setStarting(false)
     }
   }
 
@@ -135,7 +141,16 @@ export function InstallHy2Dialog({ server, onClose, onDone, notify }: {
           <label className="form-field"><span>节点名称</span><input value={name} onChange={(e) => setName(e.target.value)} /></label>
           <label className="checkbox-row"><input type="checkbox" checked={autoDNS} onChange={(e) => setAutoDNS(e.target.checked)} /><span>用 Cloudflare 自动把域名指向这台主机{zones && zones.length > 0 ? '（推荐，已识别到 Token）' : '（需在系统设置 → 集成密钥里填 Token）'}</span></label>
           <label className="checkbox-row"><input type="checkbox" checked={inStore} onChange={(e) => setInStore(e.target.checked)} /><span>接入后上架商城</span></label>
-          {error && <p role="alert" style={{ color: 'var(--red)' }}>{error}</p>}
+          {error && <p role="alert" style={{ color: 'var(--red)', overflowWrap: 'anywhere' }}>{error}</p>}
+          {error.includes('HY2_INSTALL_SCRIPT_URL') && (
+            <p className="form-note service-warn">
+              <AlertTriangle size={13} />
+              <span>
+                当前服务端尚未配置节点安装脚本地址。请在服务端环境变量（如 <code>.env</code> 或容器编排文件）中设置可信的
+                <code>HY2_INSTALL_SCRIPT_URL=https://…</code> 并重启后端；也可以先在目标主机手动部署节点，再到「HY2 节点 → 接入节点」粘贴 <code>portal-access.json</code> 导入。
+              </span>
+            </p>
+          )}
           <div className="modal-actions">
             <button className="button button-quiet" onClick={onClose}>取消</button>
             <button className="button button-primary" disabled={starting || !domainOk || !portOk || !emailOk} onClick={() => void start()}>
@@ -158,20 +173,23 @@ export function InstallHy2Dialog({ server, onClose, onDone, notify }: {
           {job.access && (
             <div className="access-card">
               <div className="access-card-head"><strong>节点后台登录信息</strong><small>只在这里显示一次，请现在保存</small></div>
-              {([['后台地址', job.access.url], ['用户名', job.access.username], ['密码', job.access.password]] as const).filter(([, v]) => v).map(([label, value]) => (
+              {([['后台地址', job.access.url], ['用户名', job.access.username], ['密码', job.access.password]] as const).filter(([, v]) => v).map(([label, value]) => {
+                const safeAccessUrl = label === '后台地址' ? safeHttpUrl(value) : undefined
+                return (
                 <div className="access-row" key={label}>
                   <span>{label}</span>
-                  {label === '后台地址' ? <a href={value} target="_blank" rel="noreferrer noopener">{value}</a> : <code>{value}</code>}
+                  {safeAccessUrl ? <a href={safeAccessUrl} target="_blank" rel="noreferrer noopener">{value}</a> : <code>{value}</code>}
                   <button className="row-action" onClick={() => { void copyToClipboard(value).then((ok) => notify(ok ? `已复制${label}` : '复制失败，请手动选中复制')) }}>复制</button>
                 </div>
-              ))}
+                )
+              })}
               <button className="button button-quiet" style={{ marginTop: 8 }} onClick={() => {
                 const a = job.access!
                 void copyToClipboard(`后台地址：${a.url}\n用户名：${a.username}\n密码：${a.password}`).then((ok) => notify(ok ? '已复制全部登录信息' : '复制失败，请手动选中复制'))
               }}>复制全部</button>
             </div>
           )}
-          <pre className="install-log" ref={logRef}>{job.log.join('\n') || '等待输出…'}</pre>
+          <pre className="install-log" ref={logRef}>{(job.log ?? []).join('\n') || '等待输出…'}</pre>
           <div className="modal-actions">
             {running
               ? <span className="form-note">安装在后台进行，关掉窗口不影响；完成后节点会出现在「HY2 节点」。</span>

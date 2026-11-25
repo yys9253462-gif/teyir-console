@@ -47,6 +47,15 @@ func TestValidTargetHostRejectsShellMetacharacters(t *testing.T) {
 		"",
 		"   ",
 		strings.Repeat("a", 300), // 超长
+		"-f",                     // ping 泛洪选项注入
+		"--flood",                // 长选项注入
+		"-I",                     // 指定网卡选项注入
+		"-c1",                    // 计数选项注入
+		"-host.example.com",      // 前导连字符非法主机名
+		"host-.example.com",      // 标签尾连字符非法主机名
+		".",                      // 裸点号
+		"a..b.com",               // 连续点号
+		"host:8080",              // 非 IPv6 的带冒号主机
 	}
 	for _, host := range bad {
 		if validTargetHost(host) {

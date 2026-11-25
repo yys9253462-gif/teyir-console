@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, loadSession, type Hy2Node, type PortalNodeStatus, type PortalVerb, isAdminSession, ADMIN_ONLY_HINT } from '../lib/api'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
@@ -91,7 +91,7 @@ async function runOne(node: Hy2Node, op: OpKey, bbrVersion: string, step: (messa
     step('下发 BBR 设置…')
     await api.nodePortalAction(node.id, { verb: 'set_bbr', params: { version: bbrVersion } })
     const status = await api.nodePortalStatus(node.id).catch(() => null)
-    const bbr = status?.probes.bbr.payload
+    const bbr = status?.probes?.bbr?.payload
     if (!bbr) return { status: 'success', message: `已下发 BBR ${bbrVersion}` }
     return {
       status: 'success',
@@ -106,8 +106,8 @@ async function runOne(node: Hy2Node, op: OpKey, bbrVersion: string, step: (messa
   const status: PortalNodeStatus = await api.nodePortalStatus(node.id)
 
   if (op === 'gost') {
-    const gost = status.probes.gost
-    if (gost.state === 'healthy' && gost.payload?.gost_installed) {
+    const gost = status.probes?.gost
+    if (gost?.state === 'healthy' && gost.payload?.gost_installed) {
       return { status: 'skipped', message: gost.payload.gost_active ? '已安装且在运行' : '已安装（服务未运行）' }
     }
     step('安装 gost…')
@@ -117,9 +117,9 @@ async function runOne(node: Hy2Node, op: OpKey, bbrVersion: string, step: (messa
 
   // reality / reality_off —— 节点只提供 toggle：必须先读状态再决定，
   // 否则开启会把已开的关掉、关闭会把已关的打开。
-  const reality = status.probes.reality
-  if (reality.state !== 'healthy' || !reality.payload) {
-    throw new Error(`读不到 Reality 状态（${reality.error || reality.state}），为避免误切未下发`)
+  const reality = status.probes?.reality
+  if (!reality || reality.state !== 'healthy' || !reality.payload) {
+    throw new Error(`读不到 Reality 状态（${reality?.error || reality?.state || '未知'}），为避免误切未下发`)
   }
   if (op === 'reality_off') {
     if (!reality.payload.installed || !reality.payload.active) return { status: 'skipped', message: 'Reality 本来就没开' }
@@ -168,11 +168,16 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
   const [rows, setRows] = useState<Record<string, RowState>>({})
   const [running, setRunning] = useState(false)
   const cancelled = useRef(false)
-
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   const current = OPS.find((o) => o.key === op)!
+  const cannotRun = readOnly || (!isAdminSession() && ADMIN_ONLY_OPS.has(op))
 
   async function start() {
-    if (readOnly || running || !selected.length) return
+    if (cannotRun || running || !selected.length) return
     const label = op === 'bbr' ? `开启 BBR ${bbrVersion}` : current.label
     const warn = current.off ? '\n\n⚠️ 关闭会断开该协议上的现有连接，用这个协议的客户需要换其它协议或重新导入订阅。' : ''
     if (!await askConfirm(`确认对 ${selected.length} 台节点执行「${label}」？\n\n${current.hint}${warn}`)) return
@@ -187,11 +192,11 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
     const worker = async () => {
       for (let node = queue.shift(); node; node = queue.shift()) {
         if (cancelled.current) {
-          setRows((r) => ({ ...r, [node!.id]: { status: 'skipped', message: '已停止，未下发' } }))
+          if (mountedRef.current) setRows((r) => ({ ...r, [node!.id]: { status: 'skipped', message: '已停止，未下发' } }))
           continue
         }
         const id = node.id
-        const step = (message: string) => setRows((r) => ({ ...r, [id]: { status: 'running', message } }))
+        const step = (message: string) => { if (mountedRef.current) setRows((r) => ({ ...r, [id]: { status: 'running', message } })) }
         step('准备中…')
         let result: RowState
         try { result = await runOne(node, op, bbrVersion, step) }
@@ -199,11 +204,11 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
         if (result.status === 'failed') outcome.failed++
         else if (result.status === 'skipped') outcome.unchanged++
         else outcome.done++
-        setRows((r) => ({ ...r, [id]: result }))
+        if (mountedRef.current) setRows((r) => ({ ...r, [id]: result }))
       }
     }
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker))
-    setRunning(false)
+    if (mountedRef.current) setRunning(false)
     const parts = [`${outcome.done} 台完成`]
     if (outcome.unchanged > 0) parts.push(`${outcome.unchanged} 台跳过（无需改动、门户不支持或已停止）`)
     notify(outcome.failed > 0
@@ -239,10 +244,10 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
       </label>}
 
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
-        <button className="button button-quiet" disabled={running || !eligible.length} onClick={() => setSelected(eligible.map((n) => n.id))}>全选可操作（{eligible.length}）</button>
-        {!running && failedIds.length > 0 && <button className="button button-quiet" onClick={() => setSelected(failedIds)}>只选失败的（{failedIds.length}）</button>}
-        <button className="button button-quiet" disabled={running || !selected.length} onClick={() => setSelected([])}>清空选择</button>
-        <button className="button button-primary" disabled={readOnly || (!isAdminSession() && ADMIN_ONLY_OPS.has(op)) || running || !selected.length} onClick={() => void start()}>
+        <button className="button button-quiet" disabled={cannotRun || running || !eligible.length} onClick={() => setSelected(eligible.map((n) => n.id))}>全选可操作（{eligible.length}）</button>
+        {!running && failedIds.length > 0 && <button className="button button-quiet" disabled={cannotRun} onClick={() => setSelected(failedIds)}>只选失败的（{failedIds.length}）</button>}
+        <button className="button button-quiet" disabled={cannotRun || running || !selected.length} onClick={() => setSelected([])}>清空选择</button>
+        <button className="button button-primary" disabled={cannotRun || running || !selected.length} onClick={() => void start()}>
           {running ? '执行中…' : `开始执行（${selected.length}）`}
         </button>
         {running && <button className="button button-quiet" onClick={() => { cancelled.current = true }}>停止剩余节点</button>}
@@ -259,7 +264,7 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
         {nodes.map((node) => {
           const row = rows[node.id]
           return <label key={node.id} style={{ display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap', padding: '4px 0', borderBottom: '1px solid var(--line-soft)' }}>
-            <input type="checkbox" checked={selected.includes(node.id)} disabled={!node.has_basic || running}
+            <input type="checkbox" checked={selected.includes(node.id)} disabled={cannotRun || !node.has_basic || running}
               onChange={(e) => setSelected((ids) => e.target.checked ? [...ids, node.id] : ids.filter((id) => id !== node.id))} />
             <span style={{ flexShrink: 0 }}>{node.name}</span>
             {!node.has_basic

@@ -9,8 +9,9 @@ export async function copyToClipboard(text: string): Promise<boolean> {
   } catch {
     // 部分内置浏览器或非 HTTPS 页面会拒绝异步剪贴板，继续走降级方案。
   }
+  let area: HTMLTextAreaElement | null = null
   try {
-    const area = document.createElement('textarea')
+    area = document.createElement('textarea')
     area.value = text
     area.setAttribute('readonly', '')
     area.style.position = 'fixed'
@@ -21,10 +22,10 @@ export async function copyToClipboard(text: string): Promise<boolean> {
     area.focus()
     area.select()
     area.setSelectionRange(0, area.value.length)
-    const ok = document.execCommand('copy')
-    document.body.removeChild(area)
-    return ok
+    return document.execCommand('copy')
   } catch {
     return false
+  } finally {
+    area?.remove()
   }
 }

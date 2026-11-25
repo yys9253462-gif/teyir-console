@@ -3,6 +3,7 @@ import { Check, CheckCircle2, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { copyToClipboard } from '../lib/clipboard'
 import { useCopiedFlash } from '../lib/copiedFlash'
 import { loadTurnstile } from '../lib/turnstile'
+import { safeSameOriginPath } from '../lib/safeUrl'
 import { Modal } from './Modal'
 
 // RenewDialog —— 交付页内弹窗续费（2026-10-30）。
@@ -60,23 +61,55 @@ export function renewTargetFrom(renewURL: string | undefined | null): RenewTarge
   return null
 }
 
-async function getJSON<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: { Accept: 'application/json' }, cache: 'no-store' })
-  const body = await response.json().catch(() => ({}))
-  if (!response.ok) throw new Error((body as { error?: string }).error || `请求失败（${response.status}）`)
-  return body as T
-}
+const STORE_REQUEST_TIMEOUT_MS = 30_000
+const STORE_UNAVAILABLE_MSG = '当前站点尚未配置在线自助续费接口，请通过外部商城页面续费或联系客服/管理员处理。'
 
-// 只允许同域相对路径的图片，防止接口返回被篡改时把图片指到外站。
-function sameOriginPath(path: string | undefined): string | undefined {
-  return path && path.startsWith('/') && !path.startsWith('//') ? path : undefined
-}
-
-// 支付跳转链接只放行 http/https，防止后端返回异常协议注入恶意脚本链接。
-function safeExternalUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined
+async function getJSON<T>(path: string, externalSignal?: AbortSignal): Promise<T> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = window.setTimeout(() => { timedOut = true; controller.abort() }, STORE_REQUEST_TIMEOUT_MS)
+  const onAbort = () => controller.abort()
+  externalSignal?.addEventListener('abort', onAbort, { once: true })
   try {
-    const parsed = new URL(value)
+    const response = await fetch(path, {
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+      signal: controller.signal,
+    })
+    const contentType = response.headers.get('content-type') ?? ''
+    const isJSON = contentType.toLowerCase().includes('json')
+    if (response.status === 404 || response.status === 502 || response.status === 503) {
+      const body = isJSON ? await response.json().catch(() => ({})) : {}
+      const backendErr = (body as { error?: string }).error
+      throw new Error(backendErr || STORE_UNAVAILABLE_MSG)
+    }
+    if (!isJSON) {
+      // 未配置外部商城反代时，静态托管/反向代理可能把 /store-api/* 回退到前端 HTML。
+      throw new Error(STORE_UNAVAILABLE_MSG)
+    }
+    const body = await response.json().catch(() => null)
+    if (!body || typeof body !== 'object') throw new Error('续费接口响应格式异常，请稍后重试')
+    if (!response.ok) throw new Error((body as { error?: string }).error || `请求失败（${response.status}）`)
+    return body as T
+  } catch (err) {
+    if (timedOut) throw new Error('续费接口响应超时，请检查网络或稍后重试')
+    throw err
+  } finally {
+    window.clearTimeout(timer)
+    externalSignal?.removeEventListener('abort', onAbort)
+  }
+}
+
+// 只允许同域相对路径的图片，拦截 //、/\ 反斜杠与控制字符并复核 URL origin，防止接口响应被篡改指到外站。
+function sameOriginPath(path: string | undefined): string | undefined {
+  return safeSameOriginPath(path)
+}
+
+// 支付跳转链接只放行绝对 http/https 且拒绝控制字符，防止后端返回异常协议注入恶意脚本链接。
+function safeExternalUrl(value: string | undefined): string | undefined {
+  if (!value || /[\u0000-\u001f\u007f]/.test(value)) return undefined
+  try {
+    const parsed = new URL(value.trim())
     return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined
   } catch {
     return undefined
@@ -92,7 +125,12 @@ function maskEmail(email: string): string {
 const POLL_MS = 4000
 const POLL_LIMIT_MS = 30 * 60 * 1000
 
-export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarget; onClose: () => void; onRenewed: () => void }) {
+export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
+  target: RenewTarget
+  fallbackUrl?: string
+  onClose: () => void
+  onRenewed: () => void
+}) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [email, setEmail] = useState('')
@@ -116,40 +154,52 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
   const [copiedKey, flashCopied] = useCopiedFlash()
   const widgetEl = useRef<HTMLDivElement | null>(null)
   const widgetID = useRef<string | null>(null)
+  const mountedRef = useRef(true)
+  const onRenewedRef = useRef(onRenewed)
+  onRenewedRef.current = onRenewed
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
+    const controller = new AbortController()
     void (async () => {
       try {
         const [catalog, ts] = await Promise.all([
-          getJSON<{ products: CatalogProduct[] }>('/store-api/catalog'),
-          getJSON<{ enabled: boolean; site_key: string }>('/store-api/turnstile'),
+          getJSON<{ products?: CatalogProduct[] }>('/store-api/catalog', controller.signal),
+          getJSON<{ enabled?: boolean; site_key?: string }>('/store-api/turnstile', controller.signal),
         ])
+        if (!Array.isArray(catalog?.products)) throw new Error(STORE_UNAVAILABLE_MSG)
         let candidates: CatalogProduct[]
+        let resolvedEmail = ''
         if (adopt) {
-          const info = await getJSON<{ product_ids: string[] }>(`/store-api/adopt-info?sub=${encodeURIComponent(target.sub)}`)
-          candidates = catalog.products.filter((p) => info.product_ids.includes(p.id) && p.denominations.length > 0)
+          const info = await getJSON<{ product_ids?: string[] }>(`/store-api/adopt-info?sub=${encodeURIComponent(target.sub)}`, controller.signal)
+          const allowedIDs = Array.isArray(info?.product_ids) ? info.product_ids : []
+          candidates = catalog.products.filter((p) => allowedIDs.includes(p.id) && Array.isArray(p.denominations) && p.denominations.length > 0)
         } else {
           const q = `order=${encodeURIComponent(target.order)}&sub=${encodeURIComponent(target.sub)}`
-          const info = await getJSON<{ order_id: string; product_id: string; email: string }>(`/store-api/renew-info?${q}`)
-          candidates = catalog.products.filter((p) => p.id === info.product_id && p.denominations.length > 0)
-          setEmail(info.email)
+          const info = await getJSON<{ order_id?: string; product_id?: string; email?: string }>(`/store-api/renew-info?${q}`, controller.signal)
+          candidates = catalog.products.filter((p) => p.id === info.product_id && Array.isArray(p.denominations) && p.denominations.length > 0)
+          resolvedEmail = info.email ?? ''
         }
         if (cancelled) return
-        if (candidates.length === 0) throw new Error('该套餐已下架，请联系客服续费')
+        if (candidates.length === 0) throw new Error('该套餐已下架或暂未开放自助续费，请联系客服续费')
+        if (!adopt) setEmail(resolvedEmail)
         setProducts(candidates)
         setProductID(candidates[0].id)
         setProductName(candidates[0].name)
         setDenominations(candidates[0].denominations)
         setDenomID(candidates[0].denominations[0].id)
-        setSiteKey(ts.enabled ? ts.site_key : '')
+        setSiteKey(ts.enabled && ts.site_key ? ts.site_key : '')
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : '读取续费信息失败')
       } finally {
         if (!cancelled) setLoading(false)
       }
     })()
-    return () => { cancelled = true }
+    return () => { cancelled = true; controller.abort() }
   }, [target.order, target.sub, adopt])
 
   const pickProduct = (p: CatalogProduct) => {
@@ -206,25 +256,34 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
     if (adopt) form.set('adopt_sub', target.sub)
     else form.set('renewal_of', target.order)
     if (method === 'VOUCHER') form.set('voucher_code', voucher.trim())
+    const controller = new AbortController()
+    let timedOut = false
+    const timer = window.setTimeout(() => { timedOut = true; controller.abort() }, STORE_REQUEST_TIMEOUT_MS)
     try {
       const response = await fetch('/shop/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
         body: form.toString(),
+        signal: controller.signal,
       })
-      const body = await response.json().catch(() => ({}))
+      const contentType = response.headers.get('content-type') ?? ''
+      const body = contentType.toLowerCase().includes('json') ? await response.json().catch(() => ({})) : {}
       if (!response.ok) throw new Error((body as { error?: string }).error || `下单失败（${response.status}）`)
       const result = body as Checkout
+      if (!result?.order_id) throw new Error(STORE_UNAVAILABLE_MSG)
+      if (!mountedRef.current) return
       setCheckout(result)
       setStatus(result.completed ? '已付款，正在续期…' : '等待付款')
       const approval = safeExternalUrl(result.approval_url)
       if (approval) window.open(approval, '_blank', 'noopener,noreferrer')
     } catch (err) {
-      setError(err instanceof Error ? err.message : '下单失败')
+      if (!mountedRef.current) return
+      setError(timedOut ? '下单请求超时，请检查网络或稍后重试' : (err instanceof Error ? err.message : '下单失败'))
       setCaptcha('')
       if (widgetID.current && window.turnstile) window.turnstile.reset(widgetID.current)
     } finally {
-      setSubmitting(false)
+      window.clearTimeout(timer)
+      if (mountedRef.current) setSubmitting(false)
     }
   }, [denom, method, siteKey, captcha, voucher, productID, email, target.order, target.sub, adopt])
 
@@ -234,15 +293,18 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
     const started = Date.now()
     let stopped = false
     let timer = 0
+    const controller = new AbortController()
     const tick = async () => {
       try {
         const order = await getJSON<{ status: string; status_label: string }>(
-          `/store-api/order?id=${encodeURIComponent(checkout.order_id)}&token=${encodeURIComponent(checkout.token)}`)
+          `/store-api/order?id=${encodeURIComponent(checkout.order_id)}&token=${encodeURIComponent(checkout.token)}`,
+          controller.signal,
+        )
         if (stopped) return
         if (order.status === 'fulfilled') {
           setDone(true)
           setStatus('续费成功')
-          onRenewed()
+          onRenewedRef.current()
           return
         }
         if (order.status === 'cancelled') { setError('订单已取消（超时未付款），请重新下单'); setPollStopped(true); return }
@@ -255,12 +317,13 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
       else setPollStopped(true)
     }
     timer = window.setTimeout(() => void tick(), 1500)
-    return () => { stopped = true; window.clearTimeout(timer) }
-  }, [checkout, done, onRenewed])
+    return () => { stopped = true; controller.abort(); window.clearTimeout(timer) }
+  }, [checkout, done])
 
   const selected = methods.find((m) => m.id === method)
   const qr = sameOriginPath(checkout?.qr_url)
   const approvalUrl = safeExternalUrl(checkout?.approval_url)
+  const safeFallbackUrl = safeExternalUrl(fallbackUrl)
 
   async function copyPayField(key: string, value: string) {
     if (await copyToClipboard(value)) flashCopied(key)
@@ -305,7 +368,7 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
           {checkout.method === 'ALIPAY' && <p className="form-note">请用支付宝扫码付款。</p>}
           {checkout.method === 'WECHAT' && <p className="form-note">请用微信扫码付款。</p>}
           {approvalUrl && (
-            <p className="form-note">已在新标签页打开 PayPal；没有弹出的话 <a href={approvalUrl} target="_blank" rel="noreferrer">点这里付款 <ExternalLink size={12} /></a>。付完回到本页即可。</p>
+            <p className="form-note">已在新标签页打开 PayPal；没有弹出的话 <a href={approvalUrl} target="_blank" rel="noreferrer noopener">点这里付款 <ExternalLink size={12} /></a>。付完回到本页即可。</p>
           )}
           {pollStopped
             ? <p className="form-note">已停止自动查询付款状态（{status || '未确认'}）。如果已经付款，刷新本页即可看到新的到期时间；没付款请关闭后重新下单。</p>
@@ -315,7 +378,14 @@ export function RenewDialog({ target, onClose, onRenewed }: { target: RenewTarge
       ) : error && denominations.length === 0 ? (
         <div>
           <p className="form-error">{error}</p>
-          <div className="modal-actions"><button className="button button-quiet" onClick={onClose}>关闭</button></div>
+          <div className="modal-actions">
+            <button className="button button-quiet" onClick={onClose}>关闭</button>
+            {safeFallbackUrl && (
+              <a className="button button-primary" href={safeFallbackUrl} target="_blank" rel="noreferrer noopener">
+                前往商城页面续费 <ExternalLink size={13} />
+              </a>
+            )}
+          </div>
         </div>
       ) : (
         <div className="renew-form">

@@ -15,6 +15,7 @@ package httpapi
 import (
 	"context"
 	"log/slog"
+	"runtime/debug"
 	"time"
 
 	"nodeops/server/internal/speedtest"
@@ -37,6 +38,14 @@ func (s *Server) StartMonitoringScheduler(ctx context.Context, interval time.Dur
 	}
 
 	go func() {
+		runSafe := func() {
+			defer func() {
+				if rec := recover(); rec != nil && s.logger != nil {
+					s.logger.Error("monitoring: 后台监控周期任务发生异常恢复", "panic", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			s.runMonitoringRound(ctx)
+		}
 		// 启动后先等 90 秒再跑第一轮。
 		//
 		// 为什么不在启动时立刻跑：面板重启往往发生在部署/故障时，
@@ -48,7 +57,7 @@ func (s *Server) StartMonitoringScheduler(ctx context.Context, interval time.Dur
 		case <-time.After(90 * time.Second):
 		}
 
-		s.runMonitoringRound(ctx)
+		runSafe()
 
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -57,7 +66,7 @@ func (s *Server) StartMonitoringScheduler(ctx context.Context, interval time.Dur
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				s.runMonitoringRound(ctx)
+				runSafe()
 			}
 		}
 	}()
@@ -185,7 +194,9 @@ ORDER BY s.name, n.name`)
 		var pj *portalJob
 		if baseURL != "" && len(ciphertext) > 0 && s.box != nil {
 			if plain, err := s.box.Open(ciphertext); err == nil {
-				pj = &portalJob{nodeID: nodeID, nodeName: nodeName, serverID: serverID, baseURL: baseURL, apiKey: string(plain)}
+				apiKey := string(plain)
+				clear(plain)
+				pj = &portalJob{nodeID: nodeID, nodeName: nodeName, serverID: serverID, baseURL: baseURL, apiKey: apiKey}
 			} else if !hasCred {
 				s.logger.Warn("monitoring: 节点 API 密钥解密失败，跳过该节点测速", "node", nodeName)
 			}
@@ -225,8 +236,17 @@ ORDER BY s.name, n.name`)
 	for _, j := range jobs {
 		go func(j job) {
 			defer func() { done <- struct{}{} }()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			defer func() {
+				if rec := recover(); rec != nil && s.logger != nil {
+					s.logger.Error("monitoring: 主机定时测速子协程异常恢复", "server", j.serverName, "panic", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 			if _, err := s.prober.RunOnServer(ctx, j.serverID, j.nodeIDs); err != nil {
 				s.logger.Warn("monitoring: 测速失败", "server", j.serverName, "error", err, "portal_fallback", len(j.fallback))
 				for _, f := range j.fallback {
@@ -243,8 +263,17 @@ ORDER BY s.name, n.name`)
 	for _, j := range portalJobs {
 		go func(j portalJob) {
 			defer func() { done <- struct{}{} }()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			defer func() {
+				if rec := recover(); rec != nil && s.logger != nil {
+					s.logger.Error("monitoring: 门户定时测速子协程异常恢复", "node", j.nodeName, "panic", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 			if err := s.prober.RunOnPortalAndStore(ctx, j.nodeID, j.serverID, j.baseURL, j.apiKey); err != nil {
 				s.logger.Warn("monitoring: 节点 portal 测速失败", "node", j.nodeName, "error", err)
 			}

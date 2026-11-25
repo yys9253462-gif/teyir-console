@@ -1,5 +1,6 @@
 services:
   db:
+    init: true
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     image: postgres:16.15-alpine@sha256:aa6cb33cf4c19c765cefcf48d96176258800870a9a1e930ad126200f9d825139
@@ -21,26 +22,34 @@ services:
       - ./server/migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U nodeops -d nodeops"]
-      interval: 60s
+      interval: 10s
       timeout: 3s
       retries: 10
+      start_period: 10s
 
-  # 升级时补跑新增迁移的幂等执行器；已应用的迁移会被自动跳过。
+  # 升级时补跑新增迁移的幂等执行器（使用精简非特权二进制阶段）；已应用的迁移会被自动跳过。
   migrate:
     build:
       context: .
       dockerfile: Dockerfile.api
-      target: build
-    command: ["go", "run", "./server/cmd/migrate"]
+      target: migrate
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 128
     ulimits:
       nofile:
         soft: 65535
         hard: 65535
+    mem_limit: 128m
+    memswap_limit: 192m
     # 挂载宿主机迁移目录，确保始终读取最新迁移脚本而不受镜像层缓存影响。
     volumes:
       - ./server/migrations:/src/server/migrations:ro
     environment:
       DATABASE_URL: postgres://nodeops:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/nodeops?sslmode=disable
+      MIGRATIONS_DIR: ${MIGRATIONS_DIR:-server/migrations}
+      MIGRATE_ASSUME_BASELINE: ${MIGRATE_ASSUME_BASELINE:-false}
     depends_on:
       db:
         condition: service_healthy
@@ -92,9 +101,11 @@ services:
       # 面板登录人机验证（Cloudflare Turnstile，两项同时配置才启用）。
       TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
       TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
-      # 可选：内部服务登录豁免密钥。
+      # 可选：内部服务登录豁免密钥与受控账号邮箱（留空则默认仅对种子管理员生效）。
       LOGIN_SERVICE_KEY: ${LOGIN_SERVICE_KEY:-}
+      LOGIN_SERVICE_EMAIL: ${LOGIN_SERVICE_EMAIL:-}
       JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-720}
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?Set SEED_ADMIN_EMAIL in .env}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?Set SEED_ADMIN_PASSWORD in .env}
       CREDENTIAL_KEY: ${CREDENTIAL_KEY:?Set CREDENTIAL_KEY in .env}
@@ -104,7 +115,9 @@ services:
       # 可选：一键安装节点脚本地址（HTTPS）及节点门户更新源仓库（格式 owner/repo）。
       HY2_INSTALL_SCRIPT_URL: ${HY2_INSTALL_SCRIPT_URL:-}
       HY2_INSTALLER_REPO: ${HY2_INSTALLER_REPO:-}
+      COLLECTOR_INTERVAL_SECONDS: ${COLLECTOR_INTERVAL_SECONDS:-30}
       EXECUTOR_INTERVAL_SECONDS: ${EXECUTOR_INTERVAL_SECONDS:-20}
+      SPEEDTEST_INTERVAL_MINUTES: ${SPEEDTEST_INTERVAL_MINUTES:-15}
       ENABLE_COLLECTOR: ${ENABLE_COLLECTOR:-false}
       # 离线地区归属库路径（文件不存在时自动跳过并记录告警，不影响启动）。
       GEO_OFFLINE_DB: ${GEO_OFFLINE_DB:-/data/geo-offline.json}
@@ -112,6 +125,7 @@ services:
       GEO_API_BASE_URL: ${GEO_API_BASE_URL:-}
       IP_PURITY_OFFLINE_DB: ${IP_PURITY_OFFLINE_DB:-}
       IP_PURITY_API_KEY: ${IP_PURITY_API_KEY:-}
+      IP_PURITY_IPQS_KEY: ${IP_PURITY_IPQS_KEY:-}
       IP_PURITY_API_BASE_URL: ${IP_PURITY_API_BASE_URL:-}
       VIEWER_RESTRICT_SUBSCRIPTIONS: ${VIEWER_RESTRICT_SUBSCRIPTIONS:-false}
     # 挂载离线归属库目录，方便宿主机放入数据文件而无需重建镜像。
@@ -143,8 +157,10 @@ services:
     read_only: true
     tmpfs: ["/tmp:size=32m,mode=1777"]
     pids_limit: 128
+    # 优先探测容器内部回环健康端口（避免配置公网域名 SITE_ADDRESS 后自动 HTTPS 重定向导致探活失败），
+    # 并在自定义旧 Caddyfile 场景下兼容回退到 http://127.0.0.1/。
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8081/healthz || wget -q --spider http://127.0.0.1/"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -169,7 +185,8 @@ services:
       - caddy_config:/config
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     networks:
       default: {}
       ingress: {}

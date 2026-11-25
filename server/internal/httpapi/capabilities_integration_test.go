@@ -21,6 +21,7 @@ func resetNodeCapsCache() {
 	nodeCapsCache.Lock()
 	nodeCapsCache.result = nodeCapabilitiesResult{}
 	nodeCapsCache.fetchedAt = time.Time{}
+	nodeCapsCache.inflight = nil
 	nodeCapsCache.lastErr = nil
 	nodeCapsCache.Unlock()
 }

@@ -6,6 +6,7 @@ import {
 import { api, type DeliveryView, type SubscriptionIncludedNode } from '../lib/api'
 import { copyToClipboard } from '../lib/clipboard'
 import { useCopiedFlash } from '../lib/copiedFlash'
+import { safeHttpUrl } from '../lib/safeUrl'
 import qrcode from 'qrcode-generator'
 import { RenewDialog, renewTargetFrom } from './RenewDialog'
 
@@ -32,20 +33,8 @@ const FORMATS = [
 
 type FormatKey = (typeof FORMATS)[number]['key']
 
-// 交付页是公开页面：链接只放行 http/https，防止后端数据被篡改时插入 javascript: 链接。
-function safeHttpUrl(value: string | undefined | null): string | undefined {
-  if (!value) return undefined
-  try {
-    const base = typeof window !== 'undefined' ? window.location.href : 'https://example.invalid/'
-    const url = new URL(value, base)
-    return url.protocol === 'https:' || url.protocol === 'http:' ? url.href : undefined
-  } catch {
-    return undefined
-  }
-}
-
 // 回退续费地址：优先使用后端下发的 renew_url；仅当部署时显式提供 VITE_RENEW_URL 才作为兜底外链。
-const RENEW_URL = safeHttpUrl((import.meta.env.VITE_RENEW_URL as string | undefined)?.trim())
+const RENEW_URL = safeHttpUrl(import.meta.env.VITE_RENEW_URL?.trim())
 
 function formatDateTime(epochSeconds: number): string {
   if (!epochSeconds || epochSeconds <= 0) return '永久有效'
@@ -137,7 +126,14 @@ export function DeliveryPage({ token }: { token: string }) {
     }
   }, [token])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    loaded.current = false
+    setView(null)
+    setError(null)
+    setGone(false)
+    setRenewOpen(false)
+    void load()
+  }, [load])
   // 2026-11-06：暂时读不到（503：服务重启、节点开户中）时每 60 秒自动重试一次，直到读到或确认不存在。
   // 客户多半不会想到去点「重试」，而开户通常一两分钟内就完成。
   const [retryTick, setRetryTick] = useState(0)
@@ -190,9 +186,15 @@ export function DeliveryPage({ token }: { token: string }) {
   const [qrIndex, setQrIndex] = useState(0)
   // 页内弹窗续费（见 RenewDialog.tsx）；非商城订单拿不到订单号，仍用原来的外链。
   const [renewOpen, setRenewOpen] = useState(false)
-  // 商城订单按原订单续；手工开通（renew_url 不带订单号）且非永久的，以订阅 token 接入续费。
-  const renewTarget = useMemo(() => renewTargetFrom(view?.renew_url) ?? ((view?.expires_at ?? 0) > 0 ? { order: '', sub: token } : null),
-    [view?.renew_url, view?.expires_at, token])
+  // 外部续费地址（后端 STORE_RENEW_BASE_URL 下发的 renew_url 或构建期 VITE_RENEW_URL）；
+  // 两者皆空说明当前站点未接入外部商城续费，禁止强行构造页内续费目标导致点击报 404/解析异常。
+  const fallbackRenewUrl = safeHttpUrl(view?.renew_url) ?? RENEW_URL
+  // 商城订单按原订单续；手工开通且站点已配置外部商城续费入口（非永久）时，以订阅令牌接入页内续费。
+  const renewTarget = useMemo(
+    () => renewTargetFrom(view?.renew_url) ?? (fallbackRenewUrl && (view?.expires_at ?? 0) > 0 ? { order: '', sub: token } : null),
+    [view?.renew_url, view?.expires_at, fallbackRenewUrl, token],
+  )
+  const handleRenewed = useCallback(() => { void load() }, [load])
   // ⚠️ 2026-10-30：线路数会变（后台改了 SUBSCRIPTION_BACKUP_BASE_URLS 后刷新，
   // 或订阅被暂停后 view 变空），而 qrIndex 是上一次选择的残留值。
   // 越界时 `qrLines[qrIndex]` 是 undefined：二维码变成空白、且没有任何标签
@@ -230,7 +232,7 @@ export function DeliveryPage({ token }: { token: string }) {
           <button className={gone ? 'button button-quiet' : 'button button-primary'} onClick={() => void load()}><RefreshCw size={14} />重试</button>
           {/* 2026-11-06：只有订阅确实不存在时才给「重新购买」。暂时读不到（服务重启、节点开户中）时摆着它，
               付费客户会以为订阅没了要重新买。 */}
-          {gone && RENEW_URL && <a className="button button-primary" href={RENEW_URL} target="_blank" rel="noreferrer">
+          {gone && RENEW_URL && <a className="button button-primary" href={RENEW_URL} target="_blank" rel="noreferrer noopener">
             <ShoppingCart size={14} />重新购买
           </a>}
         </div>
@@ -372,7 +374,11 @@ export function DeliveryPage({ token }: { token: string }) {
                     ))}
                   </div>
                 )}
-                <QrCode value={qrLines[safeQrIndex]?.url ?? ''} />
+                {qrLines.length > 0 ? (
+                  <QrCode value={qrLines[safeQrIndex]?.url ?? ''} />
+                ) : (
+                  <p className="form-note">当前暂无可生成二维码的订阅地址，请刷新或联系管理员。</p>
+                )}
                 <p className="form-note">
                   二维码内容为「通用订阅」地址，任何支持订阅的客户端都能扫。
                   {qrLines.length > 1 && '默认用主线路；它更新不了时，再换下面的备用线路重新扫码。'}
@@ -387,10 +393,12 @@ export function DeliveryPage({ token }: { token: string }) {
               </div>
               <div className="sub-link-row">
                 <input className="sub-link-input" value={view.subscription_url ?? ''} readOnly onFocus={(event) => event.currentTarget.select()} spellCheck={false} />
-                <button className="button button-primary button-compact" onClick={() => void copy('订阅链接', view.subscription_url ?? '')}>
+                <button className="button button-primary button-compact" disabled={!view.subscription_url} onClick={() => void copy('订阅链接', view.subscription_url ?? '')}>
                   {copied === '订阅链接' ? <Check size={13} /> : <Copy size={13} />}复制
                 </button>
-                <a className="button button-quiet button-compact" href={safeHttpUrl(view.subscription_url)} target="_blank" rel="noreferrer"><ExternalLink size={13} />打开</a>
+                {safeHttpUrl(view.subscription_url) && (
+                  <a className="button button-quiet button-compact" href={safeHttpUrl(view.subscription_url)} target="_blank" rel="noreferrer noopener"><ExternalLink size={13} />打开</a>
+                )}
               </div>
               <p className="form-note">这一条就是全部：把它粘进客户端即可，之后节点有变动会自动同步，不用重新导入。</p>
               {(view.backup_subscription_urls ?? []).length > 0 && (
@@ -425,12 +433,14 @@ export function DeliveryPage({ token }: { token: string }) {
               </div>
               <div className="sub-link-row">
                 <input className="sub-link-input" value={links[format] ?? ''} readOnly onFocus={(event) => event.currentTarget.select()} spellCheck={false} />
-                <button className="button button-primary button-compact" onClick={() => void copy(FORMATS.find((item) => item.key === format)?.label ?? '', links[format] ?? '')}>
+                <button className="button button-primary button-compact" disabled={!links[format]} onClick={() => void copy(FORMATS.find((item) => item.key === format)?.label ?? '', links[format] ?? '')}>
                   {copied === FORMATS.find((item) => item.key === format)?.label ? <Check size={13} /> : <Copy size={13} />}复制
                 </button>
-                <a className="button button-quiet button-compact" href={safeHttpUrl(links[format])} download={FORMATS.find((item) => item.key === format)?.file}>
-                  <Download size={13} />下载
-                </a>
+                {safeHttpUrl(links[format]) && (
+                  <a className="button button-quiet button-compact" href={safeHttpUrl(links[format])} download={FORMATS.find((item) => item.key === format)?.file}>
+                    <Download size={13} />下载
+                  </a>
+                )}
               </div>
               <p className="form-note">{FORMATS.find((item) => item.key === format)?.hint}。同一个地址按 <code>?format=</code> 区分格式，客户端一般会按 UA 自动匹配。</p>
             </section>
@@ -464,19 +474,23 @@ export function DeliveryPage({ token }: { token: string }) {
             <ShoppingCart size={15} />
             <strong>续费</strong>
           </div>
-          <p className="form-note">续费后本页链接保持不变，客户端无需任何改动。</p>
+          <p className="form-note">
+            {renewTarget || fallbackRenewUrl
+              ? '续费后本页链接保持不变，客户端无需任何改动。'
+              : '当前站点未配置在线自助续费入口，如需续费请联系客服或管理员；续费完成后点击下方刷新即可，链接与配置保持不变。'}
+          </p>
           <div className="delivery-actions">
             {renewTarget ? (
               <button className="button button-primary" onClick={() => setRenewOpen(true)}><ShoppingCart size={15} />前往续费</button>
-            ) : (safeHttpUrl(view.renew_url) ?? RENEW_URL) ? (
-              <a className="button button-primary" href={safeHttpUrl(view.renew_url) ?? RENEW_URL} target="_blank" rel="noreferrer"><ShoppingCart size={15} />前往续费</a>
+            ) : fallbackRenewUrl ? (
+              <a className="button button-primary" href={fallbackRenewUrl} target="_blank" rel="noreferrer noopener"><ShoppingCart size={15} />前往续费</a>
             ) : null}
             <button className="button button-quiet" disabled={refreshing} onClick={() => void load()}>
               <RefreshCw size={15} className={refreshing ? 'spin' : undefined} />{refreshing ? '正在刷新…' : '我已续费，刷新'}
             </button>
           </div>
           {renewOpen && renewTarget && (
-            <RenewDialog target={renewTarget} onClose={() => setRenewOpen(false)} onRenewed={() => void load()} />
+            <RenewDialog target={renewTarget} fallbackUrl={fallbackRenewUrl} onClose={() => setRenewOpen(false)} onRenewed={handleRenewed} />
           )}
         </section>
 

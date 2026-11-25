@@ -26,15 +26,25 @@ type Form struct {
 }
 
 func main() {
-	check := flag.Bool("check", false, "check generated catalog")
+	check := flag.Bool("check", false, "校验生成的 Telegram 表单目录是否与路由一致")
+	write := flag.Bool("write", false, "写入生成的 Telegram 表单目录（不传 -check 时默认写入）")
 	flag.Parse()
+	if *check && *write {
+		fmt.Fprintln(os.Stderr, "参数冲突：-check 与 -write 不能同时使用")
+		os.Exit(2)
+	}
 	dir := "server/internal/httpapi"
 	fs := token.NewFileSet()
 	files, err := parser.ParseDir(fs, dir, func(i os.FileInfo) bool { return !strings.HasSuffix(i.Name(), "_test.go") }, 0)
 	if err != nil {
-		panic(err)
+		fmt.Fprintf(os.Stderr, "解析目录 %s 失败: %v\n", dir, err)
+		os.Exit(1)
 	}
 	pkg := files["httpapi"]
+	if pkg == nil {
+		fmt.Fprintf(os.Stderr, "未在 %s 中找到 httpapi 包\n", dir)
+		os.Exit(1)
+	}
 	types := map[string]ast.Expr{}
 	funcs := map[string]*ast.FuncDecl{}
 	for _, f := range pkg.Files {
@@ -51,14 +61,23 @@ func main() {
 			}
 		}
 	}
-	var fields func(ast.Expr, string) []Field
-	fields = func(e ast.Expr, prefix string) []Field {
+	var fields func(ast.Expr, string, map[string]bool) []Field
+	fields = func(e ast.Expr, prefix string, visited map[string]bool) []Field {
+		if e == nil {
+			return nil
+		}
 		if p, ok := e.(*ast.StarExpr); ok {
-			return fields(p.X, prefix)
+			return fields(p.X, prefix, visited)
 		}
 		if id, ok := e.(*ast.Ident); ok {
+			if visited[id.Name] {
+				return nil
+			}
 			if t, ok := types[id.Name]; ok {
-				return fields(t, prefix)
+				visited[id.Name] = true
+				res := fields(t, prefix, visited)
+				delete(visited, id.Name)
+				return res
 			}
 		}
 		st, ok := e.(*ast.StructType)
@@ -87,7 +106,7 @@ func main() {
 					kind = "number"
 				} else if t.Name == "bool" {
 					kind = "bool"
-				} else if nested := fields(t, name+"."); len(nested) > 0 {
+				} else if nested := fields(t, name+".", visited); len(nested) > 0 {
 					out = append(out, nested...)
 					continue
 				}
@@ -96,7 +115,7 @@ func main() {
 			case *ast.MapType:
 				kind = "map"
 			case *ast.StructType:
-				out = append(out, fields(t, name+".")...)
+				out = append(out, fields(t, name+".", visited)...)
 				continue
 			}
 			out = append(out, Field{name, kind, "body"})
@@ -111,6 +130,10 @@ func main() {
 				server = f
 			}
 		}
+	}
+	if server == nil {
+		fmt.Fprintf(os.Stderr, "未在 %s 中找到 server.go\n", dir)
+		os.Exit(1)
 	}
 	ast.Inspect(server, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -168,7 +191,7 @@ func main() {
 			if m.Sel.Name == "Decode" && len(c.Args) == 1 {
 				if u, ok := c.Args[0].(*ast.UnaryExpr); ok {
 					if id, ok := u.X.(*ast.Ident); ok {
-						for _, f := range fields(vars[id.Name], "") {
+						for _, f := range fields(vars[id.Name], "", map[string]bool{}) {
 							if !seen[f.Location+f.Name] {
 								seen[f.Location+f.Name] = true
 								form.Fields = append(form.Fields, f)

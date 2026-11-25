@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -109,6 +110,14 @@ func (s *Server) probeIP(w http.ResponseWriter, r *http.Request) {
 	wg.Add(3)
 	go func() { // 纯净度（强制走 API 拿评分）
 		defer wg.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				if s.logger != nil {
+					s.logger.Error("ip probe: purity panic", "ip", res.IP, "panic", rec, "stack", string(debug.Stack()))
+				}
+				res.PurityError = "纯净度检测内部异常"
+			}
+		}()
 		if s.purity == nil {
 			res.PurityError = "IP 纯净度检测未启用（请在系统设置 → 集成密钥里配置）"
 			return
@@ -124,6 +133,11 @@ func (s *Server) probeIP(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() { // 原生 IP：注册地（RDAP）与实际使用地（geo）一致即原生
 		defer wg.Done()
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("ip probe: native panic", "ip", res.IP, "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
 		callCtx, c := context.WithTimeout(ctx, 20*time.Second)
 		defer c()
 		reg, _, _ := ippurity.RegistrationCountry(callCtx, res.IP)
@@ -141,6 +155,14 @@ func (s *Server) probeIP(w http.ResponseWriter, r *http.Request) {
 	}()
 	go func() { // 解锁：只有本面板的节点能从自己的出口现场检测
 		defer wg.Done()
+		defer func() {
+			if rec := recover(); rec != nil {
+				if s.logger != nil {
+					s.logger.Error("ip probe: unlock panic", "ip", res.IP, "panic", rec, "stack", string(debug.Stack()))
+				}
+				res.UnlockError = "解锁检测内部异常"
+			}
+		}()
 		if res.Node == nil {
 			// 查库失败时 res.Node 同样是 nil，但结论完全不同（见 NodeLookupError）：不能说成「不是你的节点」。
 			if res.NodeLookupError == "" {
@@ -199,7 +221,7 @@ func (s *Server) nodeForProbe(ctx context.Context, ip, query string) (*ipProbeNo
 	err := s.db.QueryRow(ctx, `
 SELECT n.id::text, n.name
 FROM hysteria_nodes n
-LEFT JOIN servers sv ON sv.id = n.server_id
+LEFT JOIN servers sv ON sv.id = n.server_id AND sv.deleted_at IS NULL
 LEFT JOIN node_ip_purity p ON p.node_id = n.id
 WHERE n.deleted_at IS NULL
   AND (lower(COALESCE(n.domain,'')) = $2 OR p.ip = $1 OR sv.host = $1 OR sv.host = $2)

@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -230,6 +232,13 @@ func validateOutboundForm(form map[string]string) error {
 			if !socksAddrPattern.MatchString(form["addr"]) {
 				return errors.New("SOCKS5 地址格式应为 host:port，例如 1.2.3.4:1080")
 			}
+			_, portStr, err := net.SplitHostPort(form["addr"])
+			if err != nil {
+				return errors.New("SOCKS5 地址格式应为 host:port，例如 1.2.3.4:1080")
+			}
+			if port, err := strconv.Atoi(portStr); err != nil || port < 1 || port > 65535 {
+				return errors.New("SOCKS5 端口需为 1-65535")
+			}
 		case "http":
 			if !proxyURLPattern.MatchString(form["url"]) {
 				return errors.New("HTTP 代理地址格式应为 http://host:port 或 https://host:port")
@@ -244,8 +253,8 @@ func validateOutboundForm(form map[string]string) error {
 			return errors.New("出站类型只能是 direct / socks5 / http")
 		}
 		for _, k := range []string{"username", "password", "addr", "url"} {
-			if strings.ContainsAny(form[k], "\r\n") {
-				return errors.New("参数不能包含换行")
+			if controlChars.MatchString(form[k]) {
+				return errors.New("参数不能包含控制字符或换行")
 			}
 		}
 	case "delete":

@@ -39,3 +39,18 @@ func TestCountryFromRDAP(t *testing.T) {
 		}
 	}
 }
+
+// 两位非字母串（如 "--"、"12"）不能被误判成合法 ISO 国家码。
+func TestCountryCodeRejectsNonAlphaTwoCharValues(t *testing.T) {
+	for _, bad := range []string{"--", "12", "??", "A1", "9Z"} {
+		if got, ok := countryCode(bad); ok {
+			t.Errorf("countryCode(%q) 应判定无效，实际返回 %q", bad, got)
+		}
+		if got, ok := countryFromRDAP(rdapNetwork{Country: bad}); ok {
+			t.Errorf("countryFromRDAP(%q) 应判定无效，实际返回 %q", bad, got)
+		}
+	}
+	if got, ok := countryCode("jp"); !ok || got != "JP" {
+		t.Errorf("合法两位字母码应归一为大写 JP，实际 (%q, %v)", got, ok)
+	}
+}

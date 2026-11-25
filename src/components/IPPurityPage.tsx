@@ -77,6 +77,14 @@ function riskFlags(p: IPPurity): { flags: string[]; state: 'risk' | 'clean' | 'u
   return { flags, state: 'unknown' }
 }
 
+function formatShortTime(iso: string | null | undefined, emptyLabel: string): string {
+  if (!iso) return emptyLabel
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime())
+    ? emptyLabel
+    : date.toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
 type FilterKey = 'all' | 'native' | 'broadcast' | 'dualsp' | 'risk' | 'unchecked'
 type SortKey = 'server' | 'native' | 'score'
 
@@ -98,7 +106,10 @@ export function IPPurityPage({ notify, readOnly = false }: Props) {
   const mounted = useRef(true)
   useEffect(() => {
     mounted.current = true
-    return () => { mounted.current = false }
+    return () => {
+      mounted.current = false
+      loadSeq.current += 1
+    }
   }, [])
 
   const load = useCallback(async (silent = false) => {
@@ -107,7 +118,7 @@ export function IPPurityPage({ notify, readOnly = false }: Props) {
     try {
       const result = await api.ipPurityList()
       if (!mounted.current || seq !== loadSeq.current) return
-      setItems(result.items)
+      setItems(result.items ?? [])
       setLoadError('')
     } catch (error) {
       if (!mounted.current || seq !== loadSeq.current) return
@@ -129,11 +140,13 @@ export function IPPurityPage({ notify, readOnly = false }: Props) {
     })
     try {
       await api.refreshIPPurity(nodeId, true)
-      notify(`${nodeName} 的 IP 纯净度已更新`, 'info')
+      if (mounted.current) notify(`${nodeName} 的 IP 纯净度已更新`, 'info')
     } catch (error) {
-      notify(error instanceof Error ? error.message : 'IP 纯净度检测失败', 'error')
+      if (mounted.current) notify(error instanceof Error ? error.message : 'IP 纯净度检测失败', 'error')
     } finally {
-      await load(true)
+      if (mounted.current) {
+        await load(true)
+      }
       if (mounted.current) {
         setRefreshingIds((prev) => {
           const next = new Set(prev)
@@ -144,17 +157,22 @@ export function IPPurityPage({ notify, readOnly = false }: Props) {
     }
   }
 
+  const admin = isAdminSession()
   async function refreshAll() {
-    if (bulkRunning) return
+    if (!admin || bulkRunning) return
     setBulkRunning(true)
     try {
       const r = await api.refreshAllIPPurity()
-      notify(`批量检测完成：成功 ${r.ok}，跳过 ${r.skipped}${r.failed ? `，失败 ${r.failed}` : ''}`, r.failed ? 'error' : 'info')
+      if (mounted.current) {
+        notify(`批量检测完成：成功 ${r.ok}，跳过 ${r.skipped}${r.failed ? `，失败 ${r.failed}` : ''}`, r.failed ? 'error' : 'info')
+      }
     } catch (error) {
-      notify(error instanceof Error ? error.message : '批量检测失败', 'error')
+      if (mounted.current) notify(error instanceof Error ? error.message : '批量检测失败', 'error')
     } finally {
-      await load(true)
-      setBulkRunning(false)
+      if (mounted.current) {
+        await load(true)
+      }
+      if (mounted.current) setBulkRunning(false)
     }
   }
 
@@ -227,16 +245,16 @@ export function IPPurityPage({ notify, readOnly = false }: Props) {
           <p className="page-subtitle">原生 / 广播、连接类型、双 ISP、风险标记，以及节点本机测得的流媒体与 AI 解锁情况</p>
         </div>
         <div className="heading-actions">
-          {/* 2026-11-06：POST /api/ip-probe 是 requireAdmin；原来运维账号也能打开弹窗、填完点检测才收到 403。 */}
-          <button className="button button-quiet" disabled={readOnly || !isAdminSession()} onClick={() => setProbing(true)}
-            title={readOnly ? '只读账号无法执行检测' : !isAdminSession() ? '仅管理员可检测任意 IP（会消耗第三方查询配额）' : '输入任意 IP 或域名，检测纯净度与流媒体解锁'}>
+          {/* 2026-11-06：POST /api/ip-probe 与 POST /api/ip-purity/refresh-all 均为 requireAdmin，避免运维账号点击后才遇到 403。 */}
+          <button className="button button-quiet" disabled={readOnly || !admin} onClick={() => setProbing(true)}
+            title={readOnly ? '只读账号无法执行检测' : !admin ? '仅管理员可检测任意 IP（会消耗第三方查询配额）' : '输入任意 IP 或域名，检测纯净度与流媒体解锁'}>
             <ScanSearch size={16} />检测指定 IP
           </button>
           <button
             className="button button-primary"
-            disabled={readOnly || bulkRunning || loading}
+            disabled={readOnly || !admin || bulkRunning || loading}
             onClick={() => void refreshAll()}
-            title={readOnly ? '只读账号无法执行检测' : '对所有节点执行一次深度检测（走第三方 API）'}
+            title={readOnly ? '只读账号无法执行检测' : !admin ? '仅管理员可执行全量批量检测（会消耗第三方查询配额）' : '对所有节点执行一次深度检测（走第三方 API）'}
           >
             {bulkRunning ? <Loader2 size={16} className="spin" /> : <Play size={16} />}
             {bulkRunning ? '检测中…' : '批量检测全部'}
@@ -454,7 +472,7 @@ function IPPurityRow({ item, busy, readOnly, onRefresh }: {
         </div>
       </td>
       <td className="ipp-time">
-        {p.checked_at ? new Date(p.checked_at).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '从未成功'}
+        {formatShortTime(p.checked_at, '从未成功')}
         {p.error && <span className="ipp-err" title={p.error}>上次失败</span>}
       </td>
       {action}
@@ -509,13 +527,26 @@ function UnlockSection({ items, notify, readOnly }: {
   const [bulk, setBulk] = useState(false)
   // 同上：读取失败时 data 为空，每行都会显示「尚未检测 / 从未成功」，而库里其实有结果。
   const [loadError, setLoadError] = useState('')
+  const mountedRef = useRef(true)
+  const loadSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      loadSeq.current += 1
+    }
+  }, [])
 
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     try {
       const result = await api.unlockList()
-      setData(Object.fromEntries(result.items.map((it) => [it.node_id, it])))
+      if (!mountedRef.current || seq !== loadSeq.current) return
+      setData(Object.fromEntries((result.items ?? []).map((it) => [it.node_id, it])))
       setLoadError('')
     } catch (error) {
+      if (!mountedRef.current || seq !== loadSeq.current) return
       const message = error instanceof Error ? error.message : '读取解锁检测结果失败'
       setLoadError(message)
       notify(message, 'error')
@@ -525,20 +556,24 @@ function UnlockSection({ items, notify, readOnly }: {
   useEffect(() => { void load() }, [load])
 
   async function checkOne(nodeId: string): Promise<boolean> {
+    if (!mountedRef.current) return false
     setRunning((r) => ({ ...r, [nodeId]: true }))
     try {
       await api.refreshUnlock(nodeId)
       return true
     } catch (error) {
-      setData((d) => ({ ...d, [nodeId]: { ...(d[nodeId] ?? { node_id: nodeId, results: [], checked_at: null }), error: error instanceof Error ? error.message : String(error) } }))
+      if (mountedRef.current) {
+        setData((d) => ({ ...d, [nodeId]: { ...(d[nodeId] ?? { node_id: nodeId, results: [], checked_at: null }), error: error instanceof Error ? error.message : String(error) } }))
+      }
       return false
     } finally {
-      setRunning((r) => ({ ...r, [nodeId]: false }))
+      if (mountedRef.current) setRunning((r) => ({ ...r, [nodeId]: false }))
     }
   }
 
   async function checkSingle(nodeId: string, name: string) {
     const ok = await checkOne(nodeId)
+    if (!mountedRef.current) return
     notify(ok ? `${name} 解锁检测完成` : `${name} 解锁检测失败`, ok ? 'info' : 'error')
     await load()
   }
@@ -551,15 +586,19 @@ function UnlockSection({ items, notify, readOnly }: {
     let fail = 0
     const worker = async () => {
       for (let id = queue.shift(); id; id = queue.shift()) {
+        if (!mountedRef.current) break
         if (await checkOne(id)) ok++
         else fail++
-        void load()
+        if (mountedRef.current) void load()
       }
     }
     await Promise.all(Array.from({ length: Math.min(3, queue.length) }, worker))
+    if (!mountedRef.current) return
     setBulk(false)
     await load()
-    notify(`解锁检测完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`, fail ? 'error' : 'info')
+    if (mountedRef.current) {
+      notify(`解锁检测完成：成功 ${ok}${fail ? `，失败 ${fail}` : ''}`, fail ? 'error' : 'info')
+    }
   }
 
   return (
@@ -608,7 +647,7 @@ function UnlockSection({ items, notify, readOnly }: {
                     </td>
                   ) : UNLOCK_COLUMNS.map((c) => <td key={c.key}><UnlockCell result={byKey[c.key]} /></td>)}
                   <td className="ipp-time">
-                    {row?.checked_at ? new Date(row.checked_at).toLocaleString('zh-CN', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : loadError ? '—' : '从未成功'}
+                    {formatShortTime(row?.checked_at, loadError ? '—' : '从未成功')}
                     {row?.error && !never && <span className="ipp-err" title={row.error}>上次失败</span>}
                   </td>
                   <td className="ipp-col-act">
@@ -657,21 +696,37 @@ function IPProbeDialog({ notify, onClose }: { notify: Props['notify']; onClose: 
   const [result, setResult] = useState<IPProbeResult | null>(null)
   const [error, setError] = useState('')
   const [history, setHistory] = useState<string[]>(() => loadProbeHistory())
+  const mountedRef = useRef(true)
+  const probeSeq = useRef(0)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      probeSeq.current += 1
+    }
+  }, [])
 
   async function run(raw?: string) {
     const q = (raw ?? query).trim()
     if (!q || busy) return
+    const seq = ++probeSeq.current
     setQuery(q)
     setBusy(true); setError(''); setResult(null)
     try {
       const r = await api.probeIP(q)
+      if (!mountedRef.current || seq !== probeSeq.current) return
       setResult(r)
-      const next = [q, ...history.filter((h) => h !== q)]
-      setHistory(next); saveProbeHistory(next)
+      setHistory((prev) => {
+        const next = [q, ...prev.filter((h) => h !== q)]
+        saveProbeHistory(next)
+        return next
+      })
     } catch (err) {
+      if (!mountedRef.current || seq !== probeSeq.current) return
       setError(err instanceof Error ? err.message : '检测失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current && seq === probeSeq.current) setBusy(false)
     }
   }
 

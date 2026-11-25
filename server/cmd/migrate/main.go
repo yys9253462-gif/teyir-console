@@ -97,9 +97,8 @@ func main() {
 		logger.Error("migration lock failed", "error", err)
 		os.Exit(1)
 	}
-	err = run(ctx, logger, pool, dir, assumeBaseline)
-	unlock()
-	if err != nil {
+	defer unlock()
+	if err := run(ctx, logger, pool, dir, assumeBaseline); err != nil {
 		logger.Error("migration failed", "error", err)
 		os.Exit(1)
 	}
@@ -156,10 +155,8 @@ func run(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, dir strin
 			// 2026-11-04：提示写反了。默认（未设置 / false）就是记基线；要强制重放得设成 true。
 			logger.Warn("existing schema found without migration ledger; recording current files as baseline",
 				"hint", "set MIGRATE_ASSUME_BASELINE=true to replay every file instead")
-			for _, f := range files {
-				if err := recordVersion(ctx, pool, f.version, f.name); err != nil {
-					return err
-				}
+			if err := recordBaselineVersions(ctx, pool, files); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -214,16 +211,35 @@ func migrationFiles(dir string) ([]migrationFile, error) {
 		}
 		files = append(files, migrationFile{version: version, name: name, path: filepath.Join(dir, name)})
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i].version < files[j].version })
+	// 按数字大小排序（兼容 3 位 001..999 与未来 4 位 1000+，避免字典序下 1000 排到 999 之前）。
+	sort.Slice(files, func(i, j int) bool {
+		if cmp := compareVersion(files[i].version, files[j].version); cmp != 0 {
+			return cmp < 0
+		}
+		return files[i].name < files[j].name
+	})
 	// 2026-11-04：台账按版本号（数字前缀）记账。两个分支各加一个 053_*.sql 时，
 	// 后来的那个会被当成「已执行」永远跳过、且没有任何报错 —— 运行时才撞上缺列。
 	// 撞号直接失败，逼着改号。
 	for i := 1; i < len(files); i++ {
-		if files[i].version == files[i-1].version {
+		if compareVersion(files[i].version, files[i-1].version) == 0 {
 			return nil, fmt.Errorf("duplicate migration version %s: %s and %s (rename one of them)", files[i].version, files[i-1].name, files[i].name)
 		}
 	}
 	return files, nil
+}
+
+// compareVersion 比较两个纯数字版本号的数值大小，忽略前导零差异（例如 053 与 53 视为同号，999 < 1000）。
+func compareVersion(a, b string) int {
+	ta := strings.TrimLeft(a, "0")
+	tb := strings.TrimLeft(b, "0")
+	if len(ta) != len(tb) {
+		if len(ta) < len(tb) {
+			return -1
+		}
+		return 1
+	}
+	return strings.Compare(ta, tb)
 }
 
 // splitVersion takes "001_init.sql" -> "001". Leading digits only.
@@ -299,6 +315,26 @@ func recordVersion(ctx context.Context, pool *pgxpool.Pool, version, name string
 		version, name)
 	if err != nil {
 		return fmt.Errorf("record version %s: %w", version, err)
+	}
+	return nil
+}
+
+// recordBaselineVersions 在单个事务内原子记录旧库全部基线迁移，避免中途断连留下半截台账导致下次重放已建表文件。
+func recordBaselineVersions(ctx context.Context, pool *pgxpool.Pool, files []migrationFile) error {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin baseline tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for _, f := range files {
+		if _, err := tx.Exec(ctx,
+			fmt.Sprintf(`INSERT INTO %s (version, name) VALUES ($1, $2) ON CONFLICT (version) DO NOTHING`, ledgerTable),
+			f.version, f.name); err != nil {
+			return fmt.Errorf("record baseline version %s: %w", f.version, err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit baseline tx: %w", err)
 	}
 	return nil
 }

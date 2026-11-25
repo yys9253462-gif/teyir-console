@@ -361,3 +361,41 @@ func TestIPAPIIsNetworkErrorDoesNotLeakKey(t *testing.T) {
 		t.Fatalf("错误信息泄露了 API 密钥: %v", err)
 	}
 }
+
+// 构造请求失败（例如 BaseURL 含非法控制字符）时，错误同样绝不能带出查询串里的密钥。
+func TestIPAPIIsRequestBuildErrorDoesNotLeakKey(t *testing.T) {
+	secret := "FAKE-IPAPI-SECRET-ONLY-FOR-TEST"
+	p := IPAPIIs{APIKey: secret, BaseURL: "http://bad\x7fhost.invalid"}
+	_, err := p.Lookup(context.Background(), &http.Client{}, "1.2.3.4")
+	if err == nil {
+		t.Fatal("非法 BaseURL 应当返回错误")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("请求构造错误泄露了 API 密钥: %v", err)
+	}
+}
+
+// 安全客户端与 IsPublicIP 必须拦截 CGNAT、NAT64 及保留地址段，避免 SSRF 旁路。
+func TestSafeClientAndIsPublicIPRejectSpecialUseRanges(t *testing.T) {
+	for _, ip := range []string{"100.100.100.200", "64:ff9b::7f00:1", "0.1.2.3", "240.0.0.1", "::127.0.0.1", "100::1", "fec0::1"} {
+		if IsPublicIP(ip) {
+			t.Errorf("IsPublicIP(%q) = true，应拒绝特殊保留段", ip)
+		}
+	}
+	for _, target := range []string{
+		"http://100.100.100.200/",
+		"http://[64:ff9b::7f00:1]:80/",
+		"http://0.1.2.3:80/",
+		"http://240.0.0.1:80/",
+	} {
+		req, err := http.NewRequest(http.MethodGet, target, nil)
+		if err != nil {
+			t.Fatalf("构造请求 %s 失败: %v", target, err)
+		}
+		resp, err := safeClient.Do(req)
+		if err == nil {
+			resp.Body.Close()
+			t.Errorf("ippurity safeClient 应当拒绝特殊保留段目标 %s", target)
+		}
+	}
+}

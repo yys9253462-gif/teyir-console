@@ -20,6 +20,11 @@ func TestPublicIP(t *testing.T) {
 		"::ffff:10.0.0.1": false,
 		"fc00::1":         false,
 		"0.0.0.0":         false,
+		"0.1.2.3":         false, // 0.0.0.0/8 本网络保留段
+		"240.0.0.1":       false, // 240.0.0.0/4 保留地址段
+		"::127.0.0.1":     false, // ::/96 已废弃 IPv4 兼容段
+		"100::1":          false, // 100::/64 丢弃前缀
+		"fec0::1":         false, // fec0::/10 废弃站点本地段
 	} {
 		if got := PublicIP(net.ParseIP(ip)); got != want {
 			t.Errorf("PublicIP(%s) = %v, want %v", ip, got, want)

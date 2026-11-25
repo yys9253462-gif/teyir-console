@@ -672,6 +672,9 @@ const nodeReadConcurrency = 4
 // 刷新就要等几十秒、然后撞上 15s 超时 —— 那不是保护，是把一次计划内的
 // 重启放大成一片红色报错。
 func (s *Server) lockNodeRead(ctx context.Context, nodeID string) (func(), error) {
+	if norm, ok := canonicalUUID(nodeID); ok {
+		nodeID = norm
+	}
 	value, _ := s.nodeReadGates.LoadOrStore(nodeID, make(chan struct{}, nodeReadConcurrency))
 	slots := value.(chan struct{})
 	select {
@@ -1144,14 +1147,30 @@ var (
 // bearer-style value, so it must never be reachable off-box: only loopback URLs are
 // accepted, and the secret path is restricted to a plain absolute file path because
 // both are interpolated into a remote shell command.
-func validTrafficEndpoint(url, secretFile string) bool {
-	if url == "" && secretFile == "" {
+func validTrafficEndpoint(rawURL, secretFile string) bool {
+	if rawURL == "" && secretFile == "" {
 		return true
 	}
-	if !trafficEndpointURLPattern.MatchString(url) {
+	if !trafficEndpointURLPattern.MatchString(rawURL) {
 		return false
 	}
-	return trafficSecretFilePattern.MatchString(secretFile)
+	// 严格校验端口处于 1-65535 范围，防止 :0 或 :99999 通过正则放行。
+	if idx := strings.LastIndex(rawURL, ":"); idx >= 0 {
+		port, err := strconv.Atoi(rawURL[idx+1:])
+		if err != nil || port < 1 || port > 65535 {
+			return false
+		}
+	}
+	if !trafficSecretFilePattern.MatchString(secretFile) {
+		return false
+	}
+	// 禁止路径中出现 ".." 穿越段，防止越出目标目录读取任意文件。
+	for _, seg := range strings.Split(secretFile, "/") {
+		if seg == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) createServer(w http.ResponseWriter, r *http.Request) {
@@ -1312,7 +1331,16 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	// API: in that case the host is derived from the node's own public IP, so the
 	// operator can add a node with nothing but the URL and its api_key.
 	// listen_port may also be omitted — the portal supplies the authoritative value.
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil || input.Name == "" || (input.APIURL == "" && (input.ServerID == "" || input.ListenPort < 1 || input.ListenPort > 65535)) {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid node payload"})
+		return
+	}
+	input.Name = strings.TrimSpace(input.Name)
+	input.ServerID = strings.TrimSpace(input.ServerID)
+	input.Version = strings.TrimSpace(input.Version)
+	input.Domain = strings.TrimSpace(input.Domain)
+	apiURL := strings.TrimSpace(input.APIURL)
+	if input.Name == "" || (apiURL == "" && (input.ServerID == "" || input.ListenPort < 1 || input.ListenPort > 65535)) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid node payload"})
 		return
 	}
@@ -1320,7 +1348,6 @@ func (s *Server) createNode(w http.ResponseWriter, r *http.Request) {
 	var apiCiphertext []byte
 	var portalHost, portalName string
 	apiUsers := -1
-	apiURL := strings.TrimSpace(input.APIURL)
 	if apiURL != "" {
 		baseURL, err := normalizePortalURLWithToken(apiURL)
 		if err != nil {
@@ -1885,6 +1912,7 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	// 而主机白名单 write_units 对预设完全不起作用（预设不带 unit）。这与节点侧「重启、升级内核」
 	// 已经要求管理员是同一种动作，主机侧漏了。只读任务（health_check / logs）对 operator 照常可用。
 	if !readOnlyOperations[input.OperationType] && claims.Role != "admin" {
+		s.auditDenied(r, "forbidden_admin_only")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "下发写类主机任务（重启服务、系统预设等）仅限管理员；只读任务（健康检查、拉取日志）不受限制"})
 		return
 	}

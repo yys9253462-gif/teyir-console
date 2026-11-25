@@ -405,7 +405,7 @@ func (e *Executor) dial(ctx context.Context, t task) (*ssh.Client, error) {
 		return nil, fmt.Errorf("SSH 连接失败: %w", err)
 	}
 	if t.fingerprint == "" && fingerprint != "" {
-		tag, err := e.db.Exec(ctx, `UPDATE servers SET host_fingerprint=$1 WHERE id=$2 AND host_fingerprint IS NULL`, fingerprint, t.serverID)
+		tag, err := e.db.Exec(ctx, `UPDATE servers SET host_fingerprint=$1 WHERE id=$2 AND host_fingerprint IS NULL AND deleted_at IS NULL`, fingerprint, t.serverID)
 		if err != nil {
 			e.logger.Warn("executor: pin host key failed", "error", err)
 		} else if tag.RowsAffected() == 1 {

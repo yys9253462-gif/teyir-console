@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1840,6 +1841,28 @@ func (s *Server) writeStoreOrder(w http.ResponseWriter, r *http.Request, rec *su
 //
 // 设置了交付域名（控制台设置 > 环境变量 SUBSCRIPTION_PUBLIC_BASE_URL，见 deliverydomain.go）时优先使用：
 // 商城是通过面板域名调接口的，按请求 Host 推导会让发给买家的链接全是面板域名。
+// sanitizeRequestHost 清洗请求头中的主机名（Host 或 X-Forwarded-Host），防止多值拼接、路径或用户信息注入生成钓鱼链接。
+func sanitizeRequestHost(raw string) string {
+	h := strings.TrimSpace(raw)
+	if idx := strings.IndexByte(h, ','); idx >= 0 {
+		h = strings.TrimSpace(h[:idx])
+	}
+	if h == "" || len(h) > 255 || strings.ContainsAny(h, " \t\r\n/@\\?#") || controlChars.MatchString(h) {
+		return ""
+	}
+	u, err := url.Parse("http://" + h)
+	if err != nil || u.Host != h || u.Hostname() == "" || u.User != nil {
+		return ""
+	}
+	if p := u.Port(); p != "" {
+		port, perr := strconv.Atoi(p)
+		if perr != nil || port < 1 || port > 65535 {
+			return ""
+		}
+	}
+	return h
+}
+
 func subscriptionBaseURL(r *http.Request) string {
 	if v := deliveryBaseOverride(); v != "" {
 		return v
@@ -1848,8 +1871,8 @@ func subscriptionBaseURL(r *http.Request) string {
 	if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
 		scheme = "https"
 	}
-	host := r.Host
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+	host := sanitizeRequestHost(r.Host)
+	if forwarded := sanitizeRequestHost(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
 		host = forwarded
 	}
 	if host == "" {
@@ -3303,14 +3326,15 @@ func targetErrText(err error) string {
 // 带 "OPS-" 前缀（见商城 node_service._ops_create_subscription）。
 var shopOrderIDPattern = regexp.MustCompile(`^OPS-(prdord_[A-Za-z0-9_-]{8,128})$`)
 
-// storeRenewBaseURL 从环境变量读取外部商城续费基础地址，未配置时返回空串。
+// storeRenewBaseURL 从环境变量读取外部商城续费基础地址，未配置或格式不合法时返回空串。
 func storeRenewBaseURL() string {
 	raw := strings.TrimSpace(os.Getenv("STORE_RENEW_BASE_URL"))
-	if raw == "" {
+	if raw == "" || strings.ContainsAny(raw, " \t\r\n") || controlChars.MatchString(raw) {
 		return ""
 	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return ""
 	}
 	if !strings.HasSuffix(raw, "/") {

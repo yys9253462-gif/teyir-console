@@ -55,7 +55,9 @@ echo "安全评分 $score/100"`,
 	"net_route": {
 		Label: "回程线路检测",
 		Script: `if ! command -v nexttrace >/dev/null 2>&1; then
-  echo "安装 nexttrace…"; curl -fsSL https://nxtrace.org/nt -o /tmp/nt.sh && bash /tmp/nt.sh >/dev/null 2>&1 || { echo "nexttrace 安装失败" >&2; exit 2; }
+  echo "安装 nexttrace…"; nt_script=$(mktemp /tmp/nt.XXXXXX) || { echo "创建临时文件失败" >&2; exit 2; }
+  trap 'rm -f "$nt_script"' EXIT
+  curl -fsSL https://nxtrace.org/nt -o "$nt_script" && bash "$nt_script" >/dev/null 2>&1 || { echo "nexttrace 安装失败" >&2; exit 2; }
 fi
 classify(){ t="$1"
   if echo "$t" | grep -q "AS4809"; then echo "CN2"; elif echo "$t" | grep -q "AS9929"; then echo "联通 9929"; elif echo "$t" | grep -q "AS10099"; then echo "联通 CUG";
@@ -78,8 +80,10 @@ echo "线路汇总：$summary"`,
 if [ -x /etc/hysteria/install.sh ] || [ -f /etc/hysteria/install.sh ]; then
   printf 'y\nN\n' | bash /etc/hysteria/install.sh uninstall 2>&1 | tail -n 20
 elif [ -n "${HY2_INSTALL_SCRIPT_URL:-}" ]; then
-  curl -fsSL "$HY2_INSTALL_SCRIPT_URL" -o /tmp/hy2-install.sh || { echo "下载安装脚本失败" >&2; exit 2; }
-  printf 'y\nN\n' | bash /tmp/hy2-install.sh uninstall 2>&1 | tail -n 20
+  hy2_script=$(mktemp /tmp/hy2-install.XXXXXX) || { echo "创建临时文件失败" >&2; exit 2; }
+  trap 'rm -f "$hy2_script"' EXIT
+  curl -fsSL "$HY2_INSTALL_SCRIPT_URL" -o "$hy2_script" || { echo "下载安装脚本失败" >&2; exit 2; }
+  printf 'y\nN\n' | bash "$hy2_script" uninstall 2>&1 | tail -n 20
 else
   systemctl stop hysteria-server 2>/dev/null || true
   systemctl disable hysteria-server 2>/dev/null || true
@@ -131,7 +135,7 @@ if [ -z "$newest" ] || [ "$newest" = "$running" ]; then
   else echo "内核已是最新（$running），无需重启"; fi
   exit 0
 fi
-if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'hy2-ops-console'; then
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq '(teyir-console|hy2-ops-console)'; then
   echo "这是面板所在主机：新内核 $newest 已安装但不自动重启，请择时手动 reboot"; exit 0
 fi
 # 正在运行、却没设开机自启的服务，重启后不会回来 —— 先列出来，便于事后核对。
@@ -209,7 +213,11 @@ func (e *Executor) runPreset(ctx context.Context, t task) (string, []logLine, er
 	var payload struct {
 		Preset string `json:"preset"`
 	}
-	_ = json.Unmarshal(t.parameters, &payload)
+	if len(t.parameters) > 0 {
+		if err := json.Unmarshal(t.parameters, &payload); err != nil {
+			return "", nil, fmt.Errorf("parameters 不是合法 JSON")
+		}
+	}
 	preset, ok := systemPresets[payload.Preset]
 	if !ok {
 		return "", nil, fmt.Errorf("未知的预设任务: %q", payload.Preset)

@@ -3,55 +3,68 @@
 # 两种部署形态共用这一个文件：
 #
 #   A. 本地 / 内网：不放任何环境变量，Caddy 监听 :80，直接按下面「默认站点」跑。
-#   B. 公网带域名：给 web 容器设 SITE_ADDRESS=面板.example.com，
+#   B. 公网带域名：给 web 容器设 SITE_ADDRESS=panel.example.com，
 #      Caddy 会自动申领并续期 Let's Encrypt 证书，监听 443 并把 80 上的
 #      ACME 校验请求和 HTTP 访问一并处理掉（Caddy 内建行为，无需额外配置）。
 #
 # 前端一律请求同源相对路径 /api/*，所以这里转发到 api 服务。
 # 用别名 panel-api 而不是服务名 api：api 同时接在外层接入网络上，服务名在两个网络
 # 都有，web 可能解析到接入网络的地址而连不通（2026-10-17 整站 502）。panel-api 只在内部网络上。
-# 浏览器侧永远看不到后端端口，也就不存在 CORS 和混合内容问题。
+# 浏览器侧永远看不到后端端口，也就不存在跨域和混合内容问题。
 {
-	# 静态托管不需要 admin API；关掉少开一个监听端口
+	# 静态托管不需要管理接口；关掉少开一个监听端口
 	admin off
 	# 注意：全局 log 块只配置「日志器」本身，不启用站点访问日志。
 	# 真正开启访问日志的是站点块里的 log 指令（见下）。
 	log {
 		output stdout
 		format filter {
-            wrap console
-            fields {
-                request>uri replace "[redacted-request-uri]"
-                request>headers>Referer delete
-            }
-        }
-    }
+			wrap console
+			fields {
+				request>uri replace "[redacted-request-uri]"
+				request>headers>Referer delete
+			}
+		}
+	}
+}
+
+# 容器内部回环探活端点：仅监听 127.0.0.1:8081，不对外暴露，
+# 避免配置公网域名 SITE_ADDRESS 后自动 HTTPS 重定向导致容器健康检查失败。
+http://127.0.0.1:8081 {
+	handle /healthz {
+		respond "ok" 200
+	}
 }
 
 {$SITE_ADDRESS::80} {
 	encode zstd gzip
 
-	# Preserve the outer proxy's scheme; direct deployments fall back to the
-	# scheme Caddy actually received (also used by terminal Origin checks).
+	# 保留外层代理传入的协议头；直连部署时回退为 Caddy 实际收到的请求协议（同时用于终端 Origin 来源校验）。
 	map {http.request.header.X-Forwarded-Proto} {upstream_scheme} {
 		https https
 		http http
 		default {http.request.scheme}
 	}
 
+	# 规范化转发来源地址链：有上游 X-Forwarded-For 时拼接当前跳，直连无该头时直接写对端地址，避免拼出前导逗号。
+	map {http.request.header.X-Forwarded-For} {forwarded_for} {
+		"" {http.request.remote.host}
+		default "{http.request.header.X-Forwarded-For}, {http.request.remote.host}"
+	}
+
 	# 开启访问日志。这是全局 log 块做不到的事——面板持有节点 SSH 凭据，
 	# 必须留下「谁在什么时候访问了哪个接口」的记录，排查越权时才有据可依。
-	# 转发到 stdout，交给 docker logs / journald 收集。
+	# 转发到 stdout，交给 docker logs / journald 收集，同时脱敏 URI 避免订阅令牌落盘。
 	log {
 		output stdout
 		format filter {
-            wrap console
-            fields {
-                request>uri replace "[redacted-request-uri]"
-                request>headers>Referer delete
-            }
-        }
-    }
+			wrap console
+			fields {
+				request>uri replace "[redacted-request-uri]"
+				request>headers>Referer delete
+			}
+		}
+	}
 
 	# 带哈希的构建产物可以长期强缓存
 	@immutable path /assets/*
@@ -61,7 +74,7 @@
 	@html path / /index.html
 	header @html Cache-Control "no-cache"
 
-	# API 转发。
+	# 接口转发。
 	# 用 handle（而不是 handle_path）是因为 handle_path 会把匹配到的前缀剥掉，
 	# 转给后端就变成了 /servers 这类没有 /api 的路径，而后端是按 /api/... 注册的路由，
 	# 结果一律 404。这里必须保留原始路径。
@@ -72,23 +85,19 @@
 				read_timeout 60s
 			}
 			# ⚠️ 多层反代场景下必须保留上游 X-Forwarded-For，否则审计日志与限流会失真。
-			#
-			# Caddy v2 的 `reverse_proxy` 默认会用自己看到的对端覆盖 X-Forwarded-For。
-			# 在「访问者 → 外层反代 → 面板 Caddy → api」链路下，若不透传上游值，
-			# 后端只能看到内网代理地址，导致审计记录和登录限流退化为全局桶。
-			# 通过拼接 `{http.request.header.X-Forwarded-For}, {http.request.remote.host}`，
-			# 可同时兼容单机直连与多层反代两种形态。
-			header_up X-Forwarded-For "{http.request.header.X-Forwarded-For}, {http.request.remote.host}"
+			# Caddy v2 的 reverse_proxy 默认会覆盖来源地址；通过站点级 map 规范化拼接，
+			# 可同时兼容单机直连与多层反代两种形态且不产生畸形前导逗号。
+			header_up X-Forwarded-For {forwarded_for}
 
 			# ⚠️ X-Forwarded-Proto 必须保留上游声明，避免外层终止 TLS 后下发 http:// 链接。
-			# 上游未声明协议时，站点级 map 回退到本层实际 scheme，兼容单机与多层反代。
+			# 上游未声明协议时，站点级 map 回退到本层实际协议，兼容单机与多层反代。
 			header_up X-Forwarded-Proto {upstream_scheme}
 		}
 	}
 
 	# 合并订阅。客户端导入的是这个地址，所以给它一条干净的 /sub/<token>。
 	# 与 /api/* 同理用 handle（保留路径），后端按 /sub/{token} 注册。
-	# 这里必须是反代而不是 SPA 兜底——否则客户端会拿到一份 index.html。
+	# 这里必须是反代而不是单页应用兜底——否则客户端会拿到一份 index.html。
 	handle /sub/* {
 		reverse_proxy panel-api:8080 {
 			transport http {
@@ -96,18 +105,16 @@
 			}
 			# XFF 透传理由同 /api/* —— 订阅的设备数限制按来源 IP 计数，
 			# 传丢了会让所有订阅者被算成同一台设备，限制形同虚设。
-			header_up X-Forwarded-For "{http.request.header.X-Forwarded-For}, {http.request.remote.host}"
+			header_up X-Forwarded-For {forwarded_for}
 			# X-Forwarded-Proto 透传理由同 /api/*（见上）。这条链路同样要紧：
-			# /sub 的 403 拒绝页与 XML/JSON 提示里会回显订阅地址，推导错了会把
-			# 买家引到 http:// 上去。
+			# /sub 的 403 拒绝页与提示里会回显订阅地址，推导错了会把买家引到 http:// 上去。
 			header_up X-Forwarded-Proto {upstream_scheme}
 		}
 	}
 
-	# 其余全部当 SPA 处理：找不到的文件回落到 index.html，由前端路由接管。
+	# 其余全部当单页应用处理：找不到的文件回落到 index.html，由前端路由接管。
 	# 写成不带匹配器的 handle 即「兜底」——Caddy 会把带匹配器的 handle 排在前面、
-	# 这个无匹配器的排在最后，所以它不会把 /api/* 吞掉（排序按匹配器特异性，
-	# 不是文件里的书写顺序，但结果一致）。
+	# 这个无匹配器的排在最后，所以它不会把 /api/* 吞掉。
 	handle {
 		root * /srv
 		try_files {path} /index.html
@@ -116,22 +123,9 @@
 
 	# 基础安全头。面板存着节点 SSH 凭据，能加的都加上。
 	#
-	# HSTS 是这里最要紧的一条，缺了它是实打实的风险而非"少个最佳实践"：
-	# 没有 HSTS 时，浏览器第一次访问前的那一跳仍是明文 http，攻击者
-	# 在链路上做 SSL Strip 就能把登录表单 POST 重定向到自己的 http://页面，
-	# 管理员密码和 JWT 会明文落到对方手里 —— 而面板握着所有节点的 SSH 凭据，
-	# 这一次泄露等于整片集群沦陷。max-age 先给 90 天而不是常见的 1 年：
-	# 万一 panel.example.com 以后要回退到无证书部署，1 年的 HSTS 会让浏览器
-	# 在到期前始终拒绝 HTTP 访问，届时无法自救。90 天留了退路。
-	#
-	# 其余三条都是给这个特定产品加的：
-	#   - Permissions-Policy 关掉摄像头/麦克风/定位。面板不需要这些，
-	#     关掉可以缩小任何 XSS 的可用面。
-	#   - COOP 隔离浏览上下文，SAMEORIGIN 比 DENY 更适合我们（交付页
-	#     将来若有同源弹窗不受影响）。
-	#   - CSP：2026-10-17 已转正（P1-F）。前端是 Vite 产物、有内联样式，
-	#     且引了 Google Fonts —— 正式策略已按这些实测依赖显式放行，
-	#     并保留一行并行的 Report-Only 继续收集违规。
+	# HSTS 防止首次访问降级劫持（浏览器在纯 HTTP 访问下会自动忽略该头，HTTPS 下生效）；
+	# 有效期给 90 天（7776000 秒），兼顾防护与后续回退演练余地。
+	# 其余头收紧权限策略、跨源隔离与内容安全策略，显式放行字体与 Cloudflare Turnstile 验证依赖。
 	header {
 		Strict-Transport-Security "max-age=7776000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
@@ -139,8 +133,7 @@
 		Referrer-Policy "no-referrer"
 		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
 		Cross-Origin-Opener-Policy "same-origin"
-        # 内容安全策略已转正生效，显式放行字体与验证依赖，其余维持同源。
-        Content-Security-Policy "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		Content-Security-Policy "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data:; connect-src 'self' https://challenges.cloudflare.com; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 		-Server
 	}
 }

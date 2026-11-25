@@ -125,5 +125,8 @@ def remote_python(script: str, ssh: str = "panel-host",
     用法：remote_python("import os; print(os.environ.get('X'))", container=...)
     """
     b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
-    cmd = f"docker exec -i {container} sh -c 'python3 -c \"__import__(\\\"base64\\\").b64decode(\\\"{b64}\\\".strip()).decode()\"'"
+    cmd = (
+        f"docker exec -i {container} sh -c "
+        f"'python3 -c \"exec(__import__(\\\"base64\\\").b64decode(\\\"{b64}\\\".strip()).decode())\"'"
+    )
     return ssh_run(ssh, cmd, timeout=timeout)

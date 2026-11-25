@@ -85,7 +85,7 @@ WARN = "[warn]"
 # 和 API 查出来的不一样"，同一台机器在两条路径下得到不同名字 ——
 # 那是很难排查的不一致。改这里时请一并改 server/internal/geo/geo.go。
 KNOWN_PROVIDERS: list[tuple[str, list[str], list[str]]] = [
-    ("AWS", ["amazon", "aws"], ["AS16509", "AS14618", "AS8987", "AS38895"]),
+    ("AWS", ["amazon", "aws", "amazonaws"], ["AS16509", "AS14618", "AS8987", "AS38895"]),
     ("Azure", ["microsoft", "azure"], ["AS8075", "AS8068"]),
     ("GCP", ["google"], ["AS396982", "AS15169", "AS19527"]),
     ("Oracle", ["oracle"], ["AS31898", "AS14589"]),
@@ -96,18 +96,28 @@ KNOWN_PROVIDERS: list[tuple[str, list[str], list[str]]] = [
     ("Linode", ["linode", "akamai"], ["AS63949", "AS20940"]),
     ("Contabo", ["contabo"], ["AS51167", "AS40021"]),
     ("Cloudflare", ["cloudflare"], ["AS13335"]),
-    ("Scaleway", ["scaleway"], ["AS12876"]),
+    ("Scaleway", ["scaleway", "online sas", "iliad"], ["AS12876"]),
     ("Netcup", ["netcup"], ["AS197540"]),
     ("RackNerd", ["racknerd"], ["AS36352", "AS33182"]),
+    ("BandwagonHost", ["bandwagon", "it7 networks"], ["AS25820"]),
+    ("Oracle Cloud", ["oracle cloud"], []),
     ("Alibaba Cloud", ["alibaba", "aliyun", "alicloud"], ["AS45102", "AS37963"]),
     ("Tencent Cloud", ["tencent"], ["AS45090", "AS132203"]),
     ("Huawei Cloud", ["huawei"], ["AS136907", "AS55990"]),
+    ("SoftBank", ["softbank"], ["AS17676"]),
     ("M247", ["m247"], ["AS9009"]),
     ("Leaseweb", ["leaseweb"], ["AS60781", "AS28753"]),
-    ("Gcore", ["gcore"], ["AS199524", "AS202422"]),
+    ("ColoCrossing", ["colocrossing", "hostwinds", "hivelocity"], ["AS36352", "AS54290"]),
+    ("Gcore", ["gcore", "g-core"], ["AS199524", "AS202422"]),
+    ("Cherry Servers", ["cherry"], ["AS204133", "AS59642"]),
+    ("GreenCloud", ["greencloud"], ["AS42831", "AS199524"]),
+    ("ByteVirt", ["bytevirt"], []),
+    ("Akile", ["akile"], []),
+    ("DMIT", ["dmit"], ["AS906", "AS54574"]),
     ("Zenlayer", ["zenlayer"], ["AS21859"]),
     ("NTT", ["ntt"], ["AS2914"]),
     ("Cogent", ["cogent"], ["AS174"]),
+    ("Hurricane Electric", ["hurricane electric", "he.net"], ["AS6939"]),
 ]
 
 _ASN_INDEX: dict[str, str] = {}
@@ -143,7 +153,13 @@ def clean_provider(raw: str) -> str:
         "oy", "ab", "as", "kk", "k.k.",
     }
     kept = [w for w in value.split() if w.lower() not in drop]
-    return " ".join(kept) if kept else value
+    cleaned = " ".join(kept) if kept else value
+    # 与 Go 侧 cleanProviderName 对齐：去掉全大写 ASN 记录名尾部的 "-数字" 编号后缀（如 AMAZON-02）。
+    if cleaned == cleaned.upper() and "-" in cleaned:
+        head, tail = cleaned.split("-", 1)
+        if tail.isdigit():
+            cleaned = head
+    return cleaned.strip()
 
 
 def extract_asn(raw: str) -> str:
@@ -171,15 +187,15 @@ def match_known(org: str, isp: str, asn: str) -> str:
     return ""
 
 
-def query_batch(ips: list[str], retries: int = 3) -> list[dict]:
+def query_batch(ips: list[str], retries: int = 3, batch_url: str = BATCH_URL) -> list[dict]:
     """打一次 batch 请求，带重试。返回与 ips 等长的结果列表。"""
     body = json.dumps([{"query": ip, "fields": FIELDS} for ip in ips]).encode()
     last_error = ""
     for attempt in range(1, retries + 1):
         request = urllib.request.Request(
-            BATCH_URL,
+            batch_url,
             data=body,
-            headers={"Content-Type": "application/json", "User-Agent": "hy2-ops-console-geodb/1.0"},
+            headers={"Content-Type": "application/json", "User-Agent": "teyir-console-geodb/1.0"},
             method="POST",
         )
         try:
@@ -398,6 +414,8 @@ def main() -> int:
                         help="IPv6 放宽到的前缀长度（默认 48）")
     parser.add_argument("--exact-prefix", action="store_true",
                         help="等价于 --prefix 32 --v6-prefix 128（只记单 IP，库最小但只能认已知机器）")
+    parser.add_argument("--api-url", default=BATCH_URL,
+                        help="批量查询接口地址（默认 http://ip-api.com/batch；商用请换付费端点或自建源）")
     args = parser.parse_args()
 
     if args.selftest:
@@ -445,7 +463,7 @@ def main() -> int:
     failures = 0
     for index, batch in enumerate(batches, 1):
         print(f"  批次 {index}/{len(batches)} ...", flush=True)
-        results = query_batch(batch)
+        results = query_batch(batch, batch_url=args.api_url)
         if not results:
             failures += 1
         for item in results:

@@ -48,13 +48,21 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
     }
   }, [node.id])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { loadSeq.current++ }
+  }, [load])
 
-  // 节点在后台应用配置时每 3 秒刷新一次，直到应用完成。
+  // 节点在后台应用配置时每 3 秒刷新一次，直到应用完成；标签页隐藏时暂停并在切回前台补拉一次。
   useEffect(() => {
     if (!state?.applying) return
-    const t = window.setTimeout(() => { void load() }, 3000)
-    return () => window.clearTimeout(t)
+    const t = window.setTimeout(() => { if (!document.hidden) void load() }, 3000)
+    const onVisible = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearTimeout(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [state, load])
 
   async function act(params: Record<string, string>, done: string) {
@@ -89,8 +97,11 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
     return <div className="empty-state compact"><Loader2 size={18} className="spin" /><strong>读取中…</strong></div>
   }
 
-  const targets = ['warp_socks', ...state.outbounds.map((o) => o.name)].filter((n) => n !== 'warp_socks' || state.builtin.includes('warp_socks') || state.builtin.includes('warp'))
-  const globalTarget = state.outbounds[0]?.name
+  const outbounds = state.outbounds ?? []
+  const rules = state.rules ?? []
+  const builtin = state.builtin ?? []
+  const targets = ['warp_socks', ...outbounds.map((o) => o.name)].filter((n) => n !== 'warp_socks' || builtin.includes('warp_socks') || builtin.includes('warp'))
+  const globalTarget = outbounds[0]?.name
 
   return (
     <div className="egress">
@@ -116,7 +127,7 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
               改为点击后说明原因并直接打开「新增出站」。 */}
           <button className={state.mode === 'global' ? 'active' : ''} disabled={busy || readOnly || state.mode === 'global'}
             onClick={async () => {
-              if (!state.outbounds.length) {
+              if (!outbounds.length) {
                 notify('全局出口会让所有流量走一个自定义出站，这台节点还没有出站 —— 先新增一个')
                 setAdding(true)
                 return
@@ -126,7 +137,7 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
               }
             }}>全局出口</button>
         </div>
-        {!state.outbounds.length && state.mode !== 'global' && (
+        {!outbounds.length && state.mode !== 'global' && (
           <p className="form-note">要用全局出口，先在下方「出站」里新增一个 SOCKS5 / HTTP 出站。</p>
         )}
         <p className="form-note">
@@ -138,7 +149,7 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
 
       <section className="egress-block">
         <div className="egress-head">
-          <div><strong>出站</strong><span>{state.outbounds.length} 个自定义出站</span></div>
+          <div><strong>出站</strong><span>{outbounds.length} 个自定义出站</span></div>
           <button className="button button-compact button-quiet" disabled={readOnly || busy} onClick={() => setAdding(true)}><Plus size={13} />新增出站</button>
         </div>
         <div className="egress-list">
@@ -149,7 +160,7 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
               <button className="text-button" onClick={() => void probe('direct')}>测出口 IP</button>
             </div>
           </div>
-          {state.outbounds.map((o) => (
+          {outbounds.map((o) => (
             <div className="egress-row" key={o.name}>
               <div><strong>{o.name}</strong><span className="egress-type">{TYPE_LABEL[o.type] ?? o.type}</span><small>{describe(o)}</small></div>
               <div className="egress-actions">
@@ -169,10 +180,10 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
 
       <section className="egress-block">
         <div className="egress-head">
-          <div><strong>域名分流规则</strong><span>{state.rules.length} 条{state.mode === 'global' ? ' · 全局出口模式下这些规则不生效' : ''}</span></div>
+          <div><strong>域名分流规则</strong><span>{rules.length} 条{state.mode === 'global' ? ' · 全局出口模式下这些规则不生效' : ''}</span></div>
         </div>
         <div className="egress-list">
-          {state.rules.map((rule) => (
+          {rules.map((rule) => (
             <div className="egress-row" key={rule.domain}>
               <div><strong className="mono">{rule.domain}</strong><small><Route size={11} /> {rule.outbound}</small></div>
               <div className="egress-actions">
@@ -181,7 +192,7 @@ export function NodeEgress({ node, notify }: { node: Hy2Node; notify: (message: 
               </div>
             </div>
           ))}
-          {!state.rules.length && <p className="form-note">还没有分流规则。</p>}
+          {!rules.length && <p className="form-note">还没有分流规则。</p>}
         </div>
         {!readOnly && (
           <div className="egress-rule-form">
@@ -219,7 +230,18 @@ function AddOutboundDialog({ onClose, onSave, busy }: {
   const [mode, setMode] = useState('')
 
   const nameOk = /^[A-Za-z_][A-Za-z0-9_]{0,31}$/.test(name)
-  const valid = nameOk && (type === 'socks5' ? /^[^\s:]+:\d{1,5}$/.test(addr) : type === 'http' ? /^https?:\/\/\S+$/i.test(url) : true)
+  const socksMatch = /^([^\s:]+):(\d{1,5})$/.exec(addr.trim())
+  const socksPort = socksMatch ? Number(socksMatch[2]) : 0
+  const socksOk = Boolean(socksMatch) && Number.isInteger(socksPort) && socksPort >= 1 && socksPort <= 65535
+  const httpOk = (() => {
+    try {
+      const parsed = new URL(url.trim())
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && Boolean(parsed.hostname)
+    } catch {
+      return false
+    }
+  })()
+  const valid = nameOk && (type === 'socks5' ? socksOk : type === 'http' ? httpOk : true)
 
   function submit() {
     const params: Record<string, string> = { name, type }

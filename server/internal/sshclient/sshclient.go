@@ -26,6 +26,13 @@ type Credential struct {
 // When pinned is non-empty the server host key must match it, otherwise the
 // observed fingerprint is returned so the caller can store it on first use.
 func Dial(ctx context.Context, host string, port int, user string, cred Credential, pinned string) (*ssh.Client, string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return nil, "", errors.New("ssh: empty host")
+	}
+	if port < 1 || port > 65535 {
+		return nil, "", fmt.Errorf("ssh: invalid port %d", port)
+	}
 	var auth []ssh.AuthMethod
 	switch cred.Type {
 	case "password":
@@ -42,15 +49,24 @@ func Dial(ctx context.Context, host string, port int, user string, cred Credenti
 	default:
 		return nil, "", fmt.Errorf("ssh: unsupported credential type %q", cred.Type)
 	}
+	// 用互斥锁保护指纹状态，并在首次连接（TOFU）握手后锁定该指纹，
+	// 防止长连接发生密钥重协商（rekey）时对端静默更换主机密钥。
+	var fpMu sync.Mutex
+	expected := strings.TrimSpace(pinned)
 	var got string
 	config := &ssh.ClientConfig{
 		User: user,
 		Auth: auth,
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fp := Fingerprint(key)
+			fpMu.Lock()
+			defer fpMu.Unlock()
 			got = fp
-			if pinned != "" && pinned != fp {
-				return fmt.Errorf("host key mismatch: expected %s, got %s", pinned, fp)
+			if expected != "" && expected != fp {
+				return fmt.Errorf("host key mismatch: expected %s, got %s", expected, fp)
+			}
+			if expected == "" {
+				expected = fp
 			}
 			return nil
 		},
@@ -75,17 +91,20 @@ func Dial(ctx context.Context, host string, port int, user string, cred Credenti
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, conn.RemoteAddr().String(), config)
 	stopCancel()
+	fpMu.Lock()
+	observed := got
+	fpMu.Unlock()
 	if err != nil {
 		conn.Close()
 		// 指纹不符单独成型：调用方要据此提示「主机密钥变了（多半是重装系统）」，
 		// 并允许操作者确认新指纹，而不是只给一句握手失败。
-		if pinned != "" && got != "" && got != pinned {
-			return nil, got, &HostKeyMismatchError{Expected: pinned, Got: got}
+		if pinned != "" && observed != "" && observed != strings.TrimSpace(pinned) {
+			return nil, observed, &HostKeyMismatchError{Expected: strings.TrimSpace(pinned), Got: observed}
 		}
-		return nil, got, err
+		return nil, observed, err
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return ssh.NewClient(sshConn, chans, reqs), got, nil
+	return ssh.NewClient(sshConn, chans, reqs), observed, nil
 }
 
 // ValidatePrivateKey 用与连接时相同的解析器检查一把私钥能不能用（上传凭据时调用）。
@@ -95,10 +114,19 @@ func ValidatePrivateKey(keyPEM []byte) error {
 }
 
 func keySigner(keyPEM []byte) (ssh.Signer, error) {
-	if bytes.Contains(keyPEM, []byte("ENCRYPTED")) {
+	signer, err := ssh.ParsePrivateKey(keyPEM)
+	if err == nil {
+		return signer, nil
+	}
+	// 优先基于解析器返回的类型化错误识别加密私钥（同时覆盖新版 OpenSSH 加密格式与旧版 PEM 加密头），
+	// 避免用泛化子串误杀注释中碰巧含 ENCRYPTED 的普通私钥。
+	var passErr *ssh.PassphraseMissingError
+	if errors.As(err, &passErr) ||
+		bytes.Contains(keyPEM, []byte("BEGIN ENCRYPTED PRIVATE KEY")) ||
+		bytes.Contains(keyPEM, []byte("Proc-Type: 4,ENCRYPTED")) {
 		return nil, errors.New("passphrase-protected keys are not supported")
 	}
-	return ssh.ParsePrivateKey(keyPEM)
+	return nil, err
 }
 
 // Fingerprint renders an OpenSSH-style SHA256 host key fingerprint.
@@ -150,9 +178,41 @@ func (b *cappedBuffer) String() string {
 // 几 KB；256 KiB 足够容纳异常输出又不至于让内存失控。
 const maxCommandOutput = 256 << 10
 
+// openSession 在受上下文约束的前提下开启 SSH 会话，防止远端网络黑洞时
+// client.NewSession 永久阻塞且无视超时取消。
+func openSession(ctx context.Context, client *ssh.Client) (*ssh.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	type result struct {
+		session *ssh.Session
+		err     error
+	}
+	ch := make(chan result)
+	abandoned := make(chan struct{})
+	go func() {
+		s, err := client.NewSession()
+		select {
+		case ch <- result{session: s, err: err}:
+		case <-abandoned:
+			// 主协程已因超时/取消返回，此处直接回收迟到的会话避免通道泄漏。
+			if s != nil {
+				_ = s.Close()
+			}
+		}
+	}()
+	select {
+	case r := <-ch:
+		return r.session, r.err
+	case <-ctx.Done():
+		close(abandoned)
+		return nil, ctx.Err()
+	}
+}
+
 // Run executes a command and returns stdout, stderr and the exit code.
 func Run(ctx context.Context, client *ssh.Client, command string) (string, string, int, error) {
-	session, err := client.NewSession()
+	session, err := openSession(ctx, client)
 	if err != nil {
 		return "", "", -1, err
 	}

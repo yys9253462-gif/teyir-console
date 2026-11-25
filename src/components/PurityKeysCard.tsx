@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { KeyRound } from 'lucide-react'
 import { api, type PurityKeyName, type PurityKeysState } from '../lib/api'
 import { askConfirm } from './ConfirmHost'
@@ -35,25 +35,35 @@ export function PurityKeysCard({ notify }: { notify: (message: string) => void }
   // 2026-11-06：读取失败单独显示。原来静默 setState(null)，每个密钥都显示「未配置」——
   // 已经配好的密钥看起来像没配，运维可能以为纯净度检测、Cloudflare、Telegram 都不可用。
   const [loadError, setLoadError] = useState('')
+  const mountedRef = useRef(true)
 
   useEffect(() => {
+    mountedRef.current = true
     api.purityKeys()
-      .then((res) => { setState(res); setLoadError('') })
-      .catch((err) => setLoadError(err instanceof Error ? err.message : '读取失败'))
+      .then((res) => { if (mountedRef.current) { setState(res); setLoadError('') } })
+      .catch((err) => { if (mountedRef.current) setLoadError(err instanceof Error ? err.message : '读取失败') })
+    return () => { mountedRef.current = false }
   }, [])
 
   async function save(payload: Partial<Record<PurityKeyName, string>>, message: string) {
+    if (busy) return
     setBusy(true)
     try {
-      setState(await api.setPurityKeys(payload))
+      const next = await api.setPurityKeys(payload)
+      if (!mountedRef.current) return
+      setState(next)
       setDrafts({})
+      setLoadError('')
       notify(message)
     } catch (error) {
+      if (!mountedRef.current) return
       notify(error instanceof Error ? error.message : '保存失败')
       // 失败后重读一次，界面以库里的真实状态为准。
-      api.purityKeys().then((res) => { setState(res); setLoadError('') }).catch(() => {})
+      api.purityKeys()
+        .then((res) => { if (mountedRef.current) { setState(res); setLoadError('') } })
+        .catch(() => {})
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 

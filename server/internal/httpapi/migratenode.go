@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -50,12 +51,21 @@ func (s *Server) startMigrateNode(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := r.PathValue("id")
+	nodeID := strings.TrimSpace(r.PathValue("id"))
+	if norm, ok := canonicalUUID(nodeID); ok {
+		nodeID = norm
+	}
 	var in migrateRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in); err != nil || in.TargetServerID == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in); err != nil || strings.TrimSpace(in.TargetServerID) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请选择目标主机"})
 		return
 	}
+	targetID, ok := canonicalUUID(in.TargetServerID)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "目标主机 ID 格式不正确"})
+		return
+	}
+	in.TargetServerID = targetID
 	// 邮箱必填：新主机要重新申请 Let's Encrypt 证书，安装脚本没有邮箱会失败。
 	if strings.TrimSpace(in.Email) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "请填写证书通知邮箱（新主机申请 Let's Encrypt 证书必须）"})
@@ -202,6 +212,15 @@ func (s *Server) runMigrateNode(ctx context.Context, jobID, nodeID, nodeName, do
 			s.logger.Warn("migrate node failed", "node", nodeID, "error", maskHostJobOutput(err.Error()))
 		}
 	}
+	// 防护迁移后台协程异常退出，确保及时回滚并释放双主机任务锁。
+	defer func() {
+		if rec := recover(); rec != nil {
+			if s.logger != nil {
+				s.logger.Error("migrate node panic", "node", nodeID, "panic", rec, "stack", string(debug.Stack()))
+			}
+			finish(fmt.Errorf("迁移过程发生内部异常: %v", rec))
+		}
+	}()
 
 	// 请求预检可能早于换 IP 事务提交；取得租约后重新读取目标地址。
 	if err := s.db.QueryRow(ctx, `SELECT host FROM servers WHERE id=$1::uuid AND deleted_at IS NULL`, newServerID).Scan(&newHost); err != nil {
@@ -244,7 +263,11 @@ func (s *Server) runMigrateNode(ctx context.Context, jobID, nodeID, nodeName, do
 		return
 	}
 	oldAPIURL := oldTarget.BaseURL
-	u, _ := url.Parse(oldAPIURL)
+	u, parseErr := url.Parse(oldAPIURL)
+	if parseErr != nil || u == nil {
+		finish(errors.New("旧节点 API 地址格式无效，无法迁移"))
+		return
+	}
 	if tlsData.Insecure && !strings.EqualFold(u.Hostname(), domain) {
 		finish(errors.New("自签证书且API使用IP地址，请先以节点域名重新绑定API并登记证书指纹，再迁移"))
 		return
@@ -375,7 +398,7 @@ func (s *Server) runMigrateNode(ctx context.Context, jobID, nodeID, nodeName, do
 		s.logger.Warn("migrate node interrupted", "node", nodeID, "target", newServerID)
 		return
 	}
-	if err != nil || code != 0 {
+	if code != 0 {
 		finish(fmt.Errorf("新主机安装失败（退出码 %d）：%s", code, firstNonEmpty(strings.TrimSpace(stderr), "详见日志")))
 		return
 	}

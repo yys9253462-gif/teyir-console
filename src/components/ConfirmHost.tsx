@@ -19,11 +19,17 @@ const DANGER = /删除|清除|停止|移除|关闭后|不能被恢复|重写|迁
 
 export function ConfirmHost() {
   const [queue, setQueue] = useState<Pending[]>([])
+  const queueRef = useRef<Pending[]>([])
+  queueRef.current = queue
   const okRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
   useEffect(() => {
     push = (p) => setQueue((q) => [...q, p])
-    return () => { push = null }
+    return () => {
+      push = null
+      // 组件卸载时结算全部未决确认，避免调用方 await askConfirm 永久挂起。
+      for (const pending of queueRef.current) pending.resolve(false)
+    }
   }, [])
   const current = queue[0]
   // 2026-11-06：危险操作默认聚焦「取消」。原来一律聚焦确认键：按回车提交表单、或连按一次回车，
@@ -37,6 +43,7 @@ export function ConfirmHost() {
     if (!current) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault()
         e.stopImmediatePropagation()
         e.stopPropagation()
         current.resolve(false)

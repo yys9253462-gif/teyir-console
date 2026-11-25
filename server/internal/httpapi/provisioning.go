@@ -604,9 +604,12 @@ func (s *Server) revokeSubscriptionAccounts(ctx context.Context, rec *subscripti
 					NodeID: j.nodeID, UserID: j.account.UserID, Reason: err.Error(),
 				})
 				mu.Unlock()
-				persistCtx, stopPersist := context.WithTimeout(context.WithoutCancel(ctx), persistReconciledAccountTimeout)
-				s.recordRevokeBackoff(persistCtx, rec.ID, j.nodeID, err.Error())
-				stopPersist()
+				// 若因外层调用方主动取消/超时导致的失败，不将健康节点拉入退避表，避免后续巡检误跳过。
+				if ctx.Err() == nil {
+					persistCtx, stopPersist := context.WithTimeout(context.WithoutCancel(ctx), persistReconciledAccountTimeout)
+					s.recordRevokeBackoff(persistCtx, rec.ID, j.nodeID, err.Error())
+					stopPersist()
+				}
 				s.logger.Warn("provisioning: revoke target unavailable",
 					"node_id", j.nodeID, "user_id", j.account.UserID, "error", err)
 				return
@@ -650,7 +653,9 @@ func (s *Server) revokeSubscriptionAccounts(ctx context.Context, rec *subscripti
 				mu.Unlock()
 				s.logger.Warn("provisioning: revoke or mapping persistence failed",
 					"node", target.NodeName, "user_id", j.account.UserID, "error", err)
-				s.recordRevokeBackoff(persistCtx, rec.ID, j.nodeID, err.Error())
+				if ctx.Err() == nil {
+					s.recordRevokeBackoff(persistCtx, rec.ID, j.nodeID, err.Error())
+				}
 				return
 			}
 			mu.Lock()

@@ -285,6 +285,9 @@ const nodeTrafficConcurrency = provisioningConcurrency
 
 // meterNodeByID 加锁后读最新的节点行再计量，保证基线和限额都是当前值。
 func (s *Server) meterNodeByID(ctx context.Context, id string) {
+	if norm, ok := canonicalUUID(id); ok {
+		id = norm
+	}
 	mu, _ := trafficMeterLocks.LoadOrStore(id, &sync.Mutex{})
 	mu.(*sync.Mutex).Lock()
 	defer mu.(*sync.Mutex).Unlock()
@@ -536,8 +539,8 @@ func (s *Server) updateNodeTrafficLimit(w http.ResponseWriter, r *http.Request) 
 		}
 		limit = &v
 	}
-	nodeID := r.PathValue("id")
-	if !uuidPattern.MatchString(nodeID) {
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "节点 ID 格式不正确"})
 		return
 	}
@@ -574,6 +577,11 @@ func (s *Server) updateNodeTrafficLimit(w http.ResponseWriter, r *http.Request) 
 	s.audit(r.Context(), r, "set_node_traffic_limit", "hysteria_node", nodeID,
 		map[string]any{"limit_bytes": limit, "reset_day": input.ResetDay})
 	go func(id string) {
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("node traffic: 即时计量协程发生异常", "node_id", id, "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 		s.meterNodeByID(ctx, id)

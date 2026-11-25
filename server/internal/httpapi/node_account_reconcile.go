@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -117,8 +118,12 @@ func (s *Server) ReconcileNodeAccounts(ctx context.Context, dryRun bool) nodeRec
 		wg.Add(1)
 		go func(i int, id string) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
 			callCtx, cancel := context.WithTimeout(ctx, provisionTimeout)
 			defer cancel()
 			target, err := s.loadPortalTarget(callCtx, id)
@@ -331,13 +336,21 @@ func shortUserID(uid string) string {
 // 上次运行时间存在 system_settings，容器重启不会让它重复跑或漏跑。
 func (s *Server) StartNodeAccountReconcile(ctx context.Context) {
 	go func() {
+		runSafe := func(fn func()) {
+			defer func() {
+				if rec := recover(); rec != nil && s.logger != nil {
+					s.logger.Error("node reconcile: 后台对账与补开户循环发生异常恢复", "panic", rec, "stack", string(debug.Stack()))
+				}
+			}()
+			fn()
+		}
 		// 开机 1 分钟后先补一次开户缺口：部署 / 重启后不用等第一个整点周期。
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(time.Minute):
 		}
-		s.queueProvisioningGaps(ctx, "boot")
+		runSafe(func() { s.queueProvisioningGaps(ctx, "boot") })
 		// 对账再等 9 分钟：避开启动时的开户 / sweeper 高峰。
 		select {
 		case <-ctx.Done():
@@ -348,8 +361,10 @@ func (s *Server) StartNodeAccountReconcile(ctx context.Context) {
 		defer ticker.Stop()
 		for {
 			// 每小时兜底：新节点开户漏掉的（节点当时不通等）在这里补排队，见 provision_gapfill.go。
-			s.queueProvisioningGaps(ctx, "hourly")
-			s.maybeReconcileNodeAccounts(ctx)
+			runSafe(func() {
+				s.queueProvisioningGaps(ctx, "hourly")
+				s.maybeReconcileNodeAccounts(ctx)
+			})
 			select {
 			case <-ctx.Done():
 				return
@@ -376,11 +391,12 @@ func (s *Server) maybeReconcileNodeAccounts(ctx context.Context) {
 	runCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	report := s.ReconcileNodeAccounts(runCtx, false)
-	s.recordNodeReconcile(runCtx, report)
-	// ⚠️ 2026-10-30：节点列表或订阅记录读失败时不能把"上次运行"写成现在。
-	// 否则这一轮等于白跑，下一次却要再等 23 小时 —— 对账缺口被人为拉长一整天。
+	// 记录审计、发通知与回写完成时间使用脱离 runCtx 的独立短超时，防止临近 10 分钟上限导致审计和通知写入失败。
+	postCtx, cancelPost := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancelPost()
+	s.recordNodeReconcile(postCtx, report)
 	// 只有全部检查和删除都成功时才刷新时间；部分失败留到下一轮重试。
 	if report.NodesChecked > 0 && nodeReconcileSucceeded(runCtx, report) {
-		s.putSetting(runCtx, nodeReconcileSettingKey, time.Now().UTC().Format(time.RFC3339), "每日节点账号对账上次运行时间")
+		_ = s.putSetting(postCtx, nodeReconcileSettingKey, time.Now().UTC().Format(time.RFC3339), "每日节点账号对账上次运行时间")
 	}
 }
