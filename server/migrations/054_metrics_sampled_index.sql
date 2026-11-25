@@ -1,0 +1,31 @@
+-- 054：server_metrics 补 sampled_at 单列索引；删掉 traffic_samples 上被唯一索引覆盖的索引
+-- （2026-11-02 审计 M2 / OPT-3 / O-S3）。
+--
+-- 1) server_metrics(sampled_at)
+--    recentMetrics（概览页每 15 秒一次，取全部主机 24h）和 MAX(sampled_at)
+--    （GET /api/runtime）都只按 sampled_at 过滤，而现有索引都以 server_id 开头，
+--    于是每次全表扫 56 万行（约 100ms），概览接口 440–646ms，页缓存一直被撑满。
+--
+-- 2) idx_traffic_samples_sampled (node_id, sampled_at DESC)
+--    与唯一索引 traffic_samples_node_id_sampled_at_source_key (node_id, sampled_at, source)
+--    前两列相同（btree 可反向扫描提供 DESC）。052 当时因"换计划有变慢风险"保留了它；
+--    这次在生产库上事务内 DROP 后对四个读 traffic_samples 的查询（/api/servers、
+--    /api/nodes、/api/monitoring、/api/traffic/hourly）逐个 EXPLAIN ANALYZE，
+--    全部改走唯一索引，耗时不变（21–28ms），再 ROLLBACK。省 37MB 和每行一次索引维护。
+--
+-- ⚠️ 迁移器把每个文件包在事务里执行，CONCURRENTLY 不能在事务里用。
+--    生产库（大表）已在迁移前手工执行：
+--      CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_server_metrics_sampled_at ON server_metrics (sampled_at);
+--      DROP INDEX CONCURRENTLY IF EXISTS idx_traffic_samples_sampled;
+--    本文件对生产库是幂等空操作；新建的库数据量小，普通 CREATE/DROP 瞬间完成。
+--
+-- node_speedtests 的索引这次一个都不删：逐条核对后没有任何一个被另一个完全覆盖
+--   idx_node_speedtests_node_measured (node_id, measured_at DESC) INCLUDE (round_id) —— 最新一轮查询（index only）
+--   idx_node_speedtests_round         (node_id, round_id, measured_at DESC)        —— 按轮取全部行
+--   idx_node_speedtests_measured      (measured_at)                                 —— 1 小时三网丢包告警、保留任务
+--   idx_node_speedtests_server_time   (server_id, measured_at DESC)                 —— 删主机时 ON DELETE CASCADE 外键查找
+--   idx_node_speedtests_unique_round  唯一约束（ON CONFLICT DO NOTHING 去重依赖它）
+
+-- 2026-11-08 L18：055 会删掉这个索引，新库上先建再删只是白白锁表，所以不再创建。
+-- （原语句）CREATE INDEX IF NOT EXISTS idx_server_metrics_sampled_at ON server_metrics (sampled_at);
+DROP INDEX IF EXISTS idx_traffic_samples_sampled;

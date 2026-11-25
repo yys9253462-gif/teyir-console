@@ -1,0 +1,83 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+*.pem
+*.key
+id_*
+!id_*.example
+.DS_Store
+*.log
+
+# 构建产物与本地运行数据
+bin/
+/server/cmd/migrate/migrate
+/migrate
+tmp/
+
+# 工具本地的会话/记忆目录，不属于项目产物
+.workbuddy/
+
+# Python 字节码缓存。tests/ 下全是 .py，跑一次 py_compile 或直接执行
+# 就会生成，误提交进去会带上一堆和平台/版本相关的 .pyc。
+__pycache__/
+*.pyc
+
+# 订阅实测脚本临时落盘的口令，绝不入库
+tests/.sub-credentials.json
+
+# 一次性的节点绑定 / 调试脚本常常内联 portal-access.json 的真实凭据。
+# 需要跑这类脚本时放 tests/local/ 里，目录整体不入库。
+tests/local/
+
+# ---- 2026-10-07 补：凭据登录器不入库 ----
+# tests/with-panel-credential.py 用面板存的（加密）SSH 凭据登录节点做验收，
+# 本身不含明文口令，但它读 /opt/hy2-ops-console/.env、并走 server_credentials
+# 的密文解密路径 —— 属于「凭据入口」代码，不该进版本库。
+# 上面已有 tests/.sub-credentials.json 与 tests/local/ 两条，本文件当时漏了。
+tests/with-panel-credential.py
+
+# UI 验收脚本产出的截图（每次跑都会变，只作人工查看用）。
+tests/*.png
+
+# 离线归属库与生成用的 IP 清单。**刻意不入库**，两个理由：
+#   1. 库是几十 MB 的持续变化数据（IP 段归属天天在变），不是代码。
+#      塞进仓库会让每次 clone 都变慢，且更新库变成"改代码"。
+#      换库只需替换宿主上的文件 + 重启 api 容器。
+#   2. IP 清单里是这个运维者**真实的服务器地址清单**，属于隐私。
+# 生成方式见 tools/gen_offline_db.py 的文档。
+geo-data/
+geo-offline.json
+*.geo-offline.json
+# 生成工具读的 IP 清单（约定放 tools/ 下，名字里不要带 example 才算清单）
+tools/ips.txt
+tools/*-ips.txt
+
+pnpm-lock.yaml
+pnpm-workspace.yaml
+
+# ---- 2026-10-06 补：源码/配置的人工备份副本不进版本库 ----
+# 这些是修复现场留档（如 executor.go.bak-p2-20261004-173432），
+# 版本库记录的是提交历史，不是文件系统快照；留在磁盘上即可。
+# 用 *.bak* 而非 *.bak-*：后者漏掉 .bak2-/.bak3-/.bak4- 这类编号变体
+# （实测 24 个里有 5 个是编号式，我第一版规则没挡住，还被自己的 grep 漏判成「0 残留」）
+*.bak*
+*.before-restore-*
+*.orig
+*.old
+*~
+*.before-restore-*
+Caddyfile.bak-*
+docker-compose.yml.bak-*
+
+# 生产机上手工留的改动前快照（回滚用），不入库。
+# 与 server/internal/**/*.bak-* 同理：那些是本地临时备份，不是项目产物。
+/meter-*-backup-*/
+
+# 2026-10-18 发布产物
+.release-ops-*/
+docker-compose.worktree.yml
+docker-compose.yml.pre-*
+docker-compose.yml.bak-*

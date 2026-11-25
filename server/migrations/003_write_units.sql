@@ -1,0 +1,1 @@
+ALTER TABLE servers ADD COLUMN write_units TEXT[] NOT NULL DEFAULT '{}';

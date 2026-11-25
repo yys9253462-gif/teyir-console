@@ -1,0 +1,62 @@
+# 宿主机部署示例：外层 Caddy 同时托管前端静态文件和反代 API。
+#
+# 适用场景：不用 Docker 跑 web 容器，而是自己构建前端 dist/，
+# 让宿主机已有的 Caddy 一起服务（前端另有站点时这样最省事）。
+#
+# 构建前端：
+#   npm ci && npm run build
+#   sudo mkdir -p /srv/hy2-ops-console && sudo cp -r dist/* /srv/hy2-ops-console/
+#
+# 然后把这个片段并进主 Caddyfile，改掉域名和路径。
+
+panel.example.com {
+	encode zstd gzip
+
+	# 站点级 log 指令才真正开启访问日志；宿主机部署时交给 /var/log/caddy 收集
+	log {
+		output file /var/log/caddy/hy2-ops-console-access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		format json
+	}
+
+	@immutable path /assets/*
+	header @immutable Cache-Control "public, max-age=31536000, immutable"
+	@html path / /index.html
+	header @html Cache-Control "no-cache"
+
+	# API 反代到本机 Go 进程（systemd unit 里的 PORT，默认 8080）。
+	# 用 handle 而非 handle_path：后者会剥掉 /api 前缀，后端按 /api/... 注册路由会 404。
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080 {
+			transport http {
+				read_timeout 60s
+			}
+		}
+	}
+
+	# 合并订阅：客户端导入的地址，必须反代到后端而不是落到 SPA 兜底，
+	# 否则客户端会拿到 index.html 而不是配置内容。
+	handle /sub/* {
+		reverse_proxy 127.0.0.1:8080 {
+			transport http {
+				read_timeout 60s
+			}
+		}
+	}
+
+	# 不带匹配器的 handle 是兜底分支，Caddy 会把它排在 /api/* 之后，不会吞掉 API 请求
+	handle {
+		root * /srv/hy2-ops-console
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}

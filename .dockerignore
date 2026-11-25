@@ -1,0 +1,41 @@
+# 构建上下文白名单之外的一切都不该传给 Docker daemon（2026-10-31）。
+#
+# 之前**没有**这个文件：每次 `docker compose build` 都会把整个仓库目录打包上传，
+# 包括 node_modules（数百 MB）、preview/、dist/、releases/ 里的预编译二进制，
+# 以及 `.env`（JWT_SECRET / POSTGRES_PASSWORD / TURNSTILE_SECRET 都在里面）。
+#
+# 三个后果：
+#   1. 构建慢 —— 上下文传输与 daemon 解包占了相当一部分时间；
+#   2. 磁盘浪费 —— 旧上下文会留在 daemon 的临时目录里；
+#   3. 最小权限被破坏 —— `.env` 虽然没被任何 COPY 引用，但它确实在上下文里，
+#      任何新增的 `COPY . .` 都会把它烤进镜像层（一旦进层，删了也还在历史里）。
+#
+# 只列"确定不该进镜像"的路径；Dockerfile.api 需要 go.mod/go.sum/server，
+# Dockerfile.web 需要 package.json/package-lock.json/tsconfig/vite.config/index.html/src/Caddyfile，
+# 都在白名单之外，这里一个都没排除错。
+
+.git
+.gitignore
+.claude
+
+# 依赖与构建产物（Dockerfile.web 自己会 npm ci + npm run build）
+node_modules
+dist
+
+# 私有环境与数据
+.env
+.env.*
+geo-data
+releases
+
+# 本地/设计/测试资料，不进运行镜像
+preview
+tests
+docs
+integrations
+tools
+
+# 现场留档与本地产物
+*.bak*
+*.orig
+*.log

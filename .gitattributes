@@ -1,0 +1,119 @@
+# 换行符策略
+#
+# 背景：这个仓库在 Windows 上开发（core.autocrlf=true），但部署目标是 Linux。
+#
+# 统一的结论是：**凡是会被送到 Linux 上执行、或被逐字节比对的文件，一律 LF**。
+# 按文件类型显式声明，不要写成 `* text=auto eol=lf` —— 那会把整个仓库的
+# 行尾都改掉，每次改动都变成整文件 diff，反而看不清真实变更。
+#
+# 已经踩过的坑：
+#   * 带 CR 的 .sh 在 Linux 上报 `bash: $'\r': command not found`，且报错行号
+#     指向无关位置，很难看出是换行符问题。
+#   * .go 若在检出时被转成 CRLF，会造成两个互相掩盖的假象：
+#     gofmt -l 把所有文件都报成未格式化；本地与服务器 md5sum 对不上，
+#     看着像代码没同步。实测加 *.go text eol=lf 并重新检出后，gofmt 报警 20 → 0。
+#   * Python 脚本经 subprocess stdin 送到远端 shell 时，即使源文件是 LF，
+#     Windows 文本模式也会在写入时注入 CR —— 这属于运行时行为，.gitattributes
+#     管不了，需要在代码里用 bytes 传参。
+#
+# 注意：这只是"提交到仓库时"的归一化，不会自动修正工作区里已有的文件。
+# 只加本文件往往看不到效果（git add --renormalize 可能因为仓库里本就是 LF 而无差异），
+# 真正要作用于工作区需要重新检出：git rm --cached -r . && git reset --hard HEAD
+
+* text=auto
+
+# shell / 配置脚本一律 LF
+*.sh   text eol=lf
+*.bash text eol=lf
+*.service text eol=lf
+Dockerfile* text eol=lf
+Caddyfile* text eol=lf
+
+# Python 虽然能读 CRLF，但这些脚本是靠 stdin / scp 送到 Linux 上跑的，
+# 保持 LF 可以避免和 shell 脚本混在一起时出现「有的能跑有的报 $'\r'」的迷惑现场。
+*.py text eol=lf
+
+# Node 测试脚本同样往远端送，也走 LF。
+*.cjs text eol=lf
+*.mjs text eol=lf
+*.js  text eol=lf
+
+# 前端源码也一律 LF。
+#
+# .tsx/.ts 不会被执行，但它们会**被逐字节比对**：排查「线上跑的是不是我这份代码」
+# 时最顺手的手段就是 md5sum。若本地工作区是 CRLF 而服务器上是 LF，
+# 两边 md5 永远不同，排查会从这里开始跑偏（实测 669 个 CR 造成的 md5 差异）。
+*.tsx text eol=lf
+*.ts  text eol=lf
+*.css text eol=lf
+*.json text eol=lf
+
+# Go 源码一律 LF。
+#
+# 仓库里存的本来就是 LF，但 core.autocrlf=true 会在检出时转成 CRLF，于是本地
+# 工作区是 CRLF、仓库是 LF —— 造成两个长期困扰的假象：
+#   1. gofmt -l 把每个文件都报成未格式化（其实是行尾差异）；
+#   2. 本地与服务器 md5sum 对不上，看起来像代码不同步，实际只是换行符。
+# 显式指定 eol=lf 后，检出即 LF，这两件事一起消失。
+*.go text eol=lf
+
+# SQL 迁移一律 LF。
+#
+# 迁移文件会被 migrate 逐个读入并执行，也会被逐字节比对（核对服务器上
+# 跑的是不是这一版）。CRLF 对 psql 通常无害，但迁移里出现 CR 会在
+# 多行语句、$$ 美元引用块和注释里产生难以定位的差异，没有理由冒这个险。
+*.sql text eol=lf
+
+# YAML / Compose 一律 LF。
+#
+# 实测踩过：`git archive` 在 core.autocrlf=true 下会按检出规则输出，
+# 未被声明的类型（当时就包括 .yml）会被转成 CRLF，于是「仓库里是 LF、
+# archive 出来是 CRLF」。打包分发时这个差异非常隐蔽 —— git cat-file
+# 看对象库是干净的 0 个 CR，解包到服务器却有 115 个，两边都能自证清白。
+#
+# 至于 docker compose 本身：实测它会自己剥掉值尾部的 \r（`MYVAR=hello\r\n`
+# 读出来是 `hello`），所以带 CR 不一定会当场炸。但 `docker run --env-file`
+# 与 `source .env` 都不会剥，同一个文件在不同读取方式下含义不同属于陷阱，
+# 统一成 LF 就没有这层歧义。
+*.yml  text eol=lf
+*.yaml text eol=lf
+
+# 环境变量模板一律 LF。
+#
+# `.env.example` 会被用户 `cp` 成 `.env`，值尾部的 CR 会跟着走。
+# 见上面 compose / source 的差异：不统一的话，同一份 .env 在
+# 「compose 读」和「shell source 读」两条路径上会得到不同的密码。
+#
+# 这里要写成 `*.env*` 而不是 `.env*`：deploy/api.env.example 这种
+# 「变量名在前、.env 在后」的文件名，`.env*` 是匹配不到的（漏网实测剩 34 个 CR）。
+*.env* text eol=lf
+
+# Markdown 一律 LF。
+#
+# 不参与执行，但会被逐字节比对（例如核对服务器上的 README 与仓库是否同版），
+# 而且 CRLF 会让 diff 在行尾带上不可见字符，评审时容易看漏真实改动。
+*.md text eol=lf
+
+# Go 模块文件一律 LF。
+#
+# go.mod / go.sum 由 Go 工具链直接读写并要求逐字节稳定：go.sum 是校验和台账，
+# 多一个 CR 会让 `go mod verify` 与「本机/服务器 md5 比对」都失去可比性。
+*.mod text eol=lf
+*.sum text eol=lf
+
+# HTML / 模板一律 LF。
+*.html text eol=lf
+*.hbs  text eol=lf
+*.tmpl text eol=lf
+
+# 纯文本与忽略清单一律 LF。
+*.txt text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# 二进制，不要碰
+*.png binary
+*.jpg binary
+*.ico binary
+*.gz  binary
+*.tar binary

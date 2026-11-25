@@ -1,0 +1,54 @@
+[Unit]
+Description=hy2-ops-console API (node operations console)
+Documentation=https://github.com/yys9253462-gif/teyir-console
+After=network-online.target postgresql.service
+Wants=network-online.target
+# 如果数据库跑在同机的 postgresql 服务上，把下面这行取消注释，
+# 让 systemd 等库起来了再拉 API，避免启动瞬间连不上直接退出。
+# Requires=postgresql.service
+
+[Service]
+Type=simple
+User=nodeops
+Group=nodeops
+WorkingDirectory=/opt/hy2-ops-console
+
+# 环境变量放独立文件，权限 600，属主 nodeops。
+# 不要把这些值直接写进本文件——unit 文件通常全局可读。
+EnvironmentFile=/etc/hy2-ops-console/api.env
+
+ExecStart=/opt/hy2-ops-console/bin/api
+
+Restart=on-failure
+RestartSec=5s
+
+# 优雅退出：main.go 收到 SIGTERM 后会停止收新请求并等 10 秒收尾
+KillSignal=SIGTERM
+TimeoutStopSec=20s
+
+# ---- 安全加固 --------------------------------------------------------------
+# 这个进程需要的是：联网（SSH 到节点）、读配置、连数据库。除此之外都关掉。
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+# 允许绑非特权端口（<1024）——若把 PORT 设成 80/443 才需要；默认 8080 时无害
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# 日志走 journald：journalctl -u hy2-ops-console -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hy2-ops-console
+
+[Install]
+WantedBy=multi-user.target

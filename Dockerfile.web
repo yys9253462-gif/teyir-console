@@ -1,0 +1,35 @@
+# 前端镜像：Vite 构建静态资源 → Caddy 托管
+#
+# 分两段：
+#   1) build 段用 node 跑 `npm run build`（内部是 tsc -b && vite build），产出 dist/
+#   2) 运行段用 caddy:2-alpine，只带上 dist/ 和 Caddyfile
+#
+# 之所以不用 nginx：Caddy 自带反代 + 自动 HTTPS，一个二进制搞定静态托管和 /api 转发，
+# 生产环境少一个需要单独配置的组件。
+
+FROM node:22-alpine AS build
+WORKDIR /app
+
+# 先只拷依赖清单，让依赖层能命中缓存——改业务代码不会触发重新 npm ci
+COPY package.json package-lock.json ./
+RUN npm ci
+
+# 再拷源码和构建配置
+COPY tsconfig.json vite.config.ts index.html ./
+COPY src ./src
+
+# vite.config.ts 里的 dev proxy 只在 `vite dev` 生效，构建产物不含任何后端地址，
+# 因此这里不需要注入 VITE_API_PROXY。前端一律用同源相对路径 /api/...，
+# 由运行段的 Caddy 转发到 api 容器。
+RUN npm run build
+
+# 反代网关同步使用已修复的编译工具链，与外层版本保持一致。
+FROM golang:1.26.11-alpine AS caddy-build
+RUN CGO_ENABLED=0 go install github.com/caddyserver/caddy/v2/cmd/caddy@v2.11.9
+
+FROM caddy:2.11.9-alpine
+COPY --from=caddy-build /go/bin/caddy /usr/bin/caddy
+COPY --from=build /app/dist /srv
+COPY Caddyfile /etc/caddy/Caddyfile
+
+EXPOSE 80 443

@@ -1,0 +1,55 @@
+name: Verify Teyir Console
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: ci-fixture-only
+          POSTGRES_DB: nodeops_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NODEOPS_TEST_DATABASE_URL: postgres://postgres:ci-fixture-only@localhost:5432/nodeops_test?sslmode=disable
+      HY2_REPAIR_TEST_DATABASE_URL: postgres://postgres:ci-fixture-only@localhost:5432/nodeops_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.11'
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Check generated Telegram forms
+        run: go run ./tools/telegram-forms -check
+      - name: Go tests, PostgreSQL integration and race detector
+        run: go test -race ./server/... -count=1 -coverprofile=coverage.out
+      - run: go vet ./server/...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./server/...
+      - run: npm ci --registry=https://registry.npmjs.org
+      - run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+      - run: npm run build
+      - name: Validate Caddy configuration
+        run: docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2.11.9-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Deployment reference script tests
+        run: python3 -m unittest tests/deploy-update-ref-test.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verification-artifacts
+          path: |
+            coverage.out
+            dist/

@@ -1,0 +1,1458 @@
+{
+  "DELETE /api/categories/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/nodes/{id}": {
+    "fields": [
+      {
+        "name": "decommissioned",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "DELETE /api/nodes/{id}/api": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/nodes/{id}/proxy-services/{pid}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/nodes/{id}/users/{uid}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/servers/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/servers/{id}/credential": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/subscriptions/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/users/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/xui/panels/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "DELETE /api/xui/panels/{id}/inbounds/{inboundID}/clients/{clientId}": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/alerts": {
+    "fields": [
+      {
+        "name": "include",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/alerts/webhook": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/alerts/{id}/events": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/audit": {
+    "fields": [
+      {
+        "name": "limit",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/auth/logins": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/block-checks": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/categories": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/cloudflare/zones": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/install-jobs": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/install-jobs/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/ip-purity": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/metrics/recent": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/monitoring/nodes": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/monitoring/nodes/{id}/quality": {
+    "fields": [
+      {
+        "name": "range",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/nodes": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/auto-hide": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/capabilities": {
+    "fields": [
+      {
+        "name": "refresh",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/api": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/ip-purity": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/outbounds": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/outbounds/probe": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/overview": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/portal-status": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/proxy-services": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/nodes/{id}/users": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/orphans": {
+    "fields": [
+      {
+        "name": "include_resolved",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/portal-update-batches": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/portal-update-batches/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/portal-update-status": {
+    "fields": [
+      {
+        "name": "refresh",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/reports/profit": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/runtime": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/schedules": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/billing": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/suggest-name": {
+    "fields": [
+      {
+        "name": "host",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/servers/{id}": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/credential": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/docker/compose": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/docker/containers": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/files": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/files/preview": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/metrics": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/servers/{id}/metrics/trend": {
+    "fields": [
+      {
+        "name": "days",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/servers/{id}/services": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/settings/delivery-domain": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/settings/purity-keys": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/settings/store-signature": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/settings/telegram": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/speedtest/targets": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/sub-ids": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/subscription": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/subscription/preview": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/subscriptions": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/subscriptions/sharing": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/tasks": {
+    "fields": [
+      {
+        "name": "ids",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "GET /api/tasks/{id}/logs": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/traffic/hourly": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/unlock": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/users": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/xui/panels": {
+    "fields": [],
+    "browser": false
+  },
+  "GET /api/xui/panels/{id}/inbounds": {
+    "fields": [],
+    "browser": false
+  },
+  "PATCH /api/categories/{id}": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "description",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "sort_order",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "slug",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PATCH /api/nodes/{id}": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "server_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "listen_port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "version",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "domain",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "in_store",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PATCH /api/servers/{id}": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "region",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "provider",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "tags",
+        "type": "array",
+        "location": "body"
+      },
+      {
+        "name": "host",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "ssh_port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "ssh_user",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "reset_host_key",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "traffic_api_url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "traffic_secret_file",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PATCH /api/subscription": {
+    "fields": [
+      {
+        "name": "enabled",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "label",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PATCH /api/subscriptions/{id}": {
+    "fields": [
+      {
+        "name": "label",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "duration_days",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "expires_at",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "ip_limit",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "auto_delete",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "user_email",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "reset_ips",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PATCH /api/users/{id}": {
+    "fields": [
+      {
+        "name": "role",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/alerts/{id}/ack": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/auth/change-password": {
+    "fields": [
+      {
+        "name": "current_password",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "new_password",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/auth/terminal-session": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/block-checks/run": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/categories": {
+    "fields": [
+      {
+        "name": "slug",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "description",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "sort_order",
+        "type": "number",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/install-jobs/{id}/resolve": {
+    "fields": [
+      {
+        "name": "confirm_remote_stopped",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/ip-probe": {
+    "fields": [
+      {
+        "name": "query",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/ip-purity/refresh-all": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/nodes": {
+    "fields": [
+      {
+        "name": "server_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "version",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "listen_port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "domain",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "api_url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "api_key",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "in_store",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/preview": {
+    "fields": [
+      {
+        "name": "url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "api_key",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "basic_user",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "basic_password",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "access_json",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/api": {
+    "fields": [
+      {
+        "name": "url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "api_key",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "basic_user",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "basic_password",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "access_json",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/ip-purity/refresh": {
+    "fields": [
+      {
+        "name": "force_api",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/migrate": {
+    "fields": [
+      {
+        "name": "target_server_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "auto_dns",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "email",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/portal-action": {
+    "fields": [
+      {
+        "name": "verb",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "params",
+        "type": "map",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/proxy-services": {
+    "fields": [
+      {
+        "name": "protocol",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/unlock/refresh": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/users": {
+    "fields": [
+      {
+        "name": "user_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "duration_days",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "ip_limit",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "traffic_gb",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "password",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/users/{uid}/renew": {
+    "fields": [
+      {
+        "name": "expires_at",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "extend_days",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "add_traffic_gb",
+        "type": "number",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/nodes/{id}/users/{uid}/status": {
+    "fields": [
+      {
+        "name": "active",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/orphans/nodes/{nodeID}/resolve-machine-offline": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/orphans/{id}/resolve": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/orphans/{id}/retry": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/portal-update-batches": {
+    "fields": [
+      {
+        "name": "node_ids",
+        "type": "array",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/portal-update-batches/{id}/cancel": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/schedules/{key}/run": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/servers": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "host",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "ssh_port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "ssh_user",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "region",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "provider",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "tags",
+        "type": "array",
+        "location": "body"
+      },
+      {
+        "name": "traffic_api_url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "traffic_secret_file",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/servers/{id}/change-ip": {
+    "fields": [
+      {
+        "name": "ip",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "update_dns",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/servers/{id}/credential": {
+    "fields": [
+      {
+        "name": "auth_type",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "secret",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "private_key_pem",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "username",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/servers/{id}/fingerprint/accept": {
+    "fields": [
+      {
+        "name": "expected_old",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "new",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/servers/{id}/install-hy2": {
+    "fields": [
+      {
+        "name": "domain",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "email",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "port",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "in_store",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "auto_dns",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/servers/{id}/test-ssh": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/servers/{id}/write-ops": {
+    "fields": [
+      {
+        "name": "allow",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "units",
+        "type": "array",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/settings/telegram/test": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/speedtest/run": {
+    "fields": [
+      {
+        "name": "node_id",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/subscription/rotate": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/subscriptions": {
+    "fields": [
+      {
+        "name": "label",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "duration_days",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "expires_at",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "ip_limit",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "auto_delete",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "user_email",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "category_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "node_ids",
+        "type": "array",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/subscriptions/close-expired-batch": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/subscriptions/reconcile-all": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/subscriptions/store-key": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/subscriptions/{id}/close-expired": {
+    "fields": [
+      {
+        "name": "reason",
+        "type": "string",
+        "location": "query"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/subscriptions/{id}/reconcile": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/subscriptions/{id}/rotate": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/tasks": {
+    "fields": [
+      {
+        "name": "server_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "node_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "operation_type",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "parameters",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/tasks/{id}/cancel": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/tasks/{id}/retry": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/users": {
+    "fields": [
+      {
+        "name": "email",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "password",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/users/{id}/password": {
+    "fields": [
+      {
+        "name": "password",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/xui/panels": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "base_url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "username",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "password",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/xui/panels/preview": {
+    "fields": [
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "base_url",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "username",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "password",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/xui/panels/{id}/clients": {
+    "fields": [
+      {
+        "name": "inbound_id",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "email",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "limit_total_bytes",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "expire_days",
+        "type": "number",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "POST /api/xui/panels/{id}/inbounds/{inboundID}/clients/{email}/reset": {
+    "fields": [],
+    "browser": false
+  },
+  "POST /api/xui/panels/{id}/refresh": {
+    "fields": [],
+    "browser": false
+  },
+  "PUT /api/alerts/webhook": {
+    "fields": [
+      {
+        "name": "url",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/nodes/auto-hide": {
+    "fields": [
+      {
+        "name": "enabled",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/nodes/{id}/categories": {
+    "fields": [
+      {
+        "name": "category_ids",
+        "type": "array",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/nodes/{id}/traffic-limit": {
+    "fields": [
+      {
+        "name": "limit_gb",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "reset_day",
+        "type": "number",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/schedules": {
+    "fields": [
+      {
+        "name": "key",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "enabled",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/servers/{id}/billing": {
+    "fields": [
+      {
+        "name": "server_id",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "expires_on",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "monthly_cost",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "currency",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "auto_renew",
+        "type": "bool",
+        "location": "body"
+      },
+      {
+        "name": "note",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/settings/cn-probe": {
+    "fields": [
+      {
+        "name": "server_id",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/settings/delivery-domain": {
+    "fields": [
+      {
+        "name": "value",
+        "type": "string",
+        "location": "body"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/settings/purity-keys": {
+    "fields": [],
+    "browser": false
+  },
+  "PUT /api/settings/store-signature": {
+    "fields": [
+      {
+        "name": "required",
+        "type": "bool",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/settings/telegram": {
+    "fields": [
+      {
+        "name": "chat_id",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  },
+  "PUT /api/subscriptions/{id}/revenue": {
+    "fields": [
+      {
+        "name": "revenue_monthly",
+        "type": "number",
+        "location": "body"
+      },
+      {
+        "name": "revenue_currency",
+        "type": "string",
+        "location": "body"
+      }
+    ],
+    "browser": false
+  }
+}

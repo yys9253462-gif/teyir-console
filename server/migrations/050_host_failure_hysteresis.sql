@@ -1,0 +1,18 @@
+-- 050：机器级 warning 增加连续失败滞回（2026-10-24 审计 P0-2）。
+--
+-- 原来 collectServer 里 metricsScript 只要失败一次就把 servers.status 置为
+-- 'warning'，下一轮成功又立刻改回 'online'；而告警评估对每次
+-- warning↔online 都新开一条 server_warning 再 resolve，
+-- 于是同一台机器一遍遍「开→关→开」。
+--
+-- 实测（2026-10-14 ~ 10-23）：美国-阿什本一台机器产生 229 条 server_warning
+-- + 64 条 server_offline，占全部告警的 65%；alert_events 里 reopened 382 次
+-- 而 triggered 只有 64 次。真故障被噪声淹没。
+--
+-- 修法与节点侧一致（见 collector.go 的 unstableAfterFailures）：连续失败
+-- 达到阈值才置 warning，成功即归零。本列独立于
+-- hysteria_nodes.consecutive_probe_failures —— 那是节点端口探测的计数，
+-- 这是「机器上跑 metrics 脚本」的计数，两者失败原因不同，不能共用。
+--
+-- 纯增量：默认 0，历史行不需要回填（下一轮采集会自然归零或累加）。
+ALTER TABLE servers ADD COLUMN IF NOT EXISTS consecutive_host_failures INT NOT NULL DEFAULT 0;

@@ -1,0 +1,526 @@
+/* 仅作用于监控首页，保留全站主题与字号缩放契约。 */
+.monitoring-home {
+  --monitor-bar: color-mix(in srgb, var(--accent) 76%, var(--green));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 20px;
+  min-width: 0;
+}
+:root[data-theme="daylight"] .monitoring-home {
+  --monitor-bar: color-mix(in srgb, var(--accent) 82%, var(--green));
+}
+.monitoring-home > * { min-width: 0; }
+.monitoring-home .monitor-heading { margin-bottom: 0; align-items: center; }
+.monitoring-home .monitor-heading h1 { font-size: 25px; font-weight: 700; letter-spacing: -.025em; }
+.monitoring-home .monitoring-list-head { flex-direction: row; align-items: center; }
+.monitoring-home .node-card-speed { margin-left: 0; opacity: 1; }
+.monitoring-home .updated-label {
+  display: grid;
+  grid-template-columns: 6px auto;
+  align-items: center;
+  gap: 2px 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--surface-rgb) / .65);
+}
+.monitoring-home .updated-label small { grid-column: 2; font-size: var(--fs-3xs); color: var(--faint); }
+
+/* 顶部六联核心指标横条 */
+.monitoring-home .monitoring-kpis {
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  background: linear-gradient(180deg, rgb(var(--text-rgb) / .022) 0%, transparent 100%), var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+.monitoring-home .metric-card {
+  min-width: 0;
+  min-height: 122px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 18px 20px;
+  background: transparent;
+  transition: background .16s ease;
+}
+.monitoring-home .metric-card:hover { background: rgb(var(--text-rgb) / .02); transform: none; }
+.monitoring-home .metric-card + .metric-card { border-left: 1px solid var(--line-soft); }
+.monitoring-home .metric-card::before, .monitoring-home .metric-card::after { display: none; }
+.monitoring-home .metric-head { color: var(--muted); gap: 8px; font-size: 13px; font-weight: 600; }
+.monitoring-home .metric-head svg {
+  width: 30px;
+  height: 30px;
+  padding: 7px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  opacity: 1;
+  flex-shrink: 0;
+}
+.monitoring-home .monitor-online .metric-head svg {
+  background: rgb(var(--green-rgb) / .12);
+  color: var(--green);
+}
+.monitoring-home .metric-body { min-height: 44px; gap: 6px; flex-wrap: wrap; margin: 8px 0 6px; }
+.monitoring-home .metric-body strong {
+  font-family: var(--sans);
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -.03em;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.monitoring-home .monitor-online .metric-body strong { color: var(--green); font-size: 32px; }
+.monitoring-home .metric-unit { font-size: var(--fs-xs); color: var(--muted); }
+.monitoring-home .metric-foot { line-height: 1.55; font-size: var(--fs-3xs); color: var(--faint); overflow-wrap: anywhere; }
+
+.monitoring-home .panel { margin: 0; border-radius: var(--radius-lg); box-shadow: var(--shadow-card); }
+.monitoring-home .monitoring-nodes-panel { background: transparent; border: 0; padding: 0; box-shadow: none; }
+.monitoring-home .section-head { gap: 14px; margin-bottom: 14px; }
+.monitoring-home .section-head h2 { font-size: var(--fs-lg); font-weight: 600; letter-spacing: -.02em; }
+.monitor-count {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  font: 500 var(--fs-2xs) var(--mono);
+  color: var(--text-soft);
+}
+.monitor-section-note { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-xs); }
+
+/* 筛选与视图工具栏 */
+.monitor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.monitoring-home .monitor-list-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.monitoring-home .monitor-search {
+  height: 36px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  min-width: 220px;
+  transition: border-color .16s, box-shadow .16s;
+}
+.monitoring-home .monitor-search:focus-within { border-color: var(--line-accent); box-shadow: var(--ring); }
+.monitoring-home .monitor-search input { width: 184px; }
+.monitoring-home .monitor-list-tools select {
+  width: auto;
+  height: 36px;
+  min-height: 36px;
+  font-size: var(--fs-xs);
+  background-color: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text-soft);
+  border-radius: var(--radius-sm);
+  padding: 0 30px 0 11px;
+  cursor: pointer;
+  transition: border-color .16s, color .16s;
+}
+.monitoring-home .monitor-list-tools select:hover { border-color: var(--line-strong); color: var(--text); }
+.monitoring-home .monitor-filter, .monitor-view {
+  display: inline-flex;
+  gap: 3px;
+  padding: 3.5px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.monitoring-home .monitor-filter button, .monitor-view button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  font: 500 12.5px var(--sans);
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  height: 29px;
+  min-height: 29px;
+  white-space: nowrap;
+  transition: all .15s ease;
+}
+.monitoring-home .monitor-filter button:hover:not(.active), .monitor-view button:hover:not(.active) {
+  color: var(--text);
+}
+.monitoring-home .monitor-filter button.active, .monitor-view button.active {
+  color: var(--accent);
+  background: var(--panel);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgb(0 0 0 / .16), 0 0 0 1px rgb(var(--text-rgb) / .04);
+}
+:root[data-theme="daylight"] .monitoring-home .monitor-filter button.active,
+:root[data-theme="daylight"] .monitor-view button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgb(15 23 42 / .08), 0 1px 2px rgb(15 23 42 / .04);
+}
+.monitoring-home .monitor-filter button b { font-weight: 600; font-family: var(--mono); }
+
+/* 节点监控卡片网格 */
+.monitoring-home .node-monitor-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 296px), 1fr));
+  gap: 14px;
+}
+.monitoring-home .node-card {
+  padding: 16px 18px;
+  gap: 13px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgb(var(--text-rgb) / .018) 0%, transparent 70%), var(--panel);
+  box-shadow: var(--shadow-sm);
+  transition: border-color .18s ease, background .18s ease, box-shadow .18s ease, transform .18s var(--ease);
+}
+.monitoring-home .node-card:hover {
+  background: linear-gradient(180deg, rgb(var(--text-rgb) / .032) 0%, transparent 75%), var(--surface);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-card);
+  transform: translateY(-2px);
+}
+.monitoring-home .node-card.is-offline {
+  border-color: rgb(var(--red-rgb) / .38);
+  box-shadow: inset 0 2px 0 rgb(var(--red-rgb) / .65), var(--shadow-sm);
+}
+.monitoring-home .node-card.is-warning {
+  border-color: color-mix(in srgb, var(--amber) 45%, var(--line));
+  box-shadow: inset 0 2px 0 rgb(var(--amber-rgb) / .65), var(--shadow-sm);
+}
+.monitoring-home .node-card:focus-visible, .monitoring-home button:focus-visible, .monitor-table-scroll:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.monitoring-home .node-card-head { flex-wrap: wrap; gap: 8px; }
+.monitoring-home .node-card-head > .status-dot { display: none; }
+.monitoring-home .node-card-title { flex: 1 1 110px; }
+.monitoring-home .node-card-title strong { font-size: var(--fs-md); font-weight: 600; letter-spacing: -.01em; }
+.monitoring-home .node-card-title small { margin-top: 3px; font-size: var(--fs-2xs); color: var(--muted); }
+
+.monitor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-3xs);
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 3px 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  line-height: 1.35;
+}
+.monitor-status i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.monitor-status.online {
+  color: var(--green);
+  border-color: rgb(var(--green-rgb) / .3);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+.monitor-status.offline {
+  color: var(--red);
+  border-color: rgb(var(--red-rgb) / .34);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
+.monitor-status.warning {
+  color: var(--amber-text);
+  border-color: var(--amber-line);
+  background: var(--amber-bg);
+}
+.monitor-status.warning i { background: var(--amber); }
+
+.monitoring-home .node-card-speed {
+  flex-shrink: 0;
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  height: 26px;
+  font: inherit;
+  font-size: var(--fs-3xs);
+  padding: 0 8px;
+  color: var(--text-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.monitoring-home .node-card-speed:hover:not(:disabled) {
+  color: var(--accent);
+  border-color: var(--line-accent);
+  background: var(--surface-3);
+}
+.monitoring-home .node-card-speed:disabled { opacity: .6; cursor: wait; }
+.monitoring-home .node-card-reason { line-height: 1.55; overflow-wrap: anywhere; font-size: var(--fs-2xs); border-radius: var(--radius-sm); }
+.monitoring-home .node-card-stats { padding: 0; border: 0; gap: 14px; }
+.monitoring-home .node-card-stats > div { gap: 6px; min-width: 0; align-content: start; }
+.monitoring-home .node-card-stats > div > strong { font-family: var(--mono); font-size: var(--fs-sm); }
+.monitoring-home .node-card-stats span { color: var(--muted); }
+
+.monitor-resource { display: grid; gap: 6px; min-width: 56px; }
+.monitor-resource strong { font: 500 var(--fs-sm) var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.monitor-resource-track {
+  display: block;
+  height: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface-3));
+  border-radius: 999px;
+  overflow: hidden;
+}
+.monitor-resource-track i { display: block; height: 100%; background: var(--accent); border-radius: 999px; }
+.monitor-resource.elevated .monitor-resource-track { background: color-mix(in srgb, var(--amber) 16%, var(--surface-3)); }
+.monitor-resource.elevated i { background: var(--amber); }
+.monitor-resource.critical .monitor-resource-track { background: color-mix(in srgb, var(--red) 16%, var(--surface-3)); }
+.monitor-resource.critical i { background: var(--red); }
+.monitor-resource.unavailable .monitor-resource-track { background: var(--line-soft); }
+.monitor-resource.unavailable strong { color: var(--faint); }
+
+.monitoring-home .node-card-carriers { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; padding: 12px 0; }
+.monitoring-home .carrier-row .carrier-row-value { font-family: var(--mono); font-size: var(--fs-2xs); color: var(--text-soft); }
+.monitoring-home .carrier-row .carrier-row-name { font-size: var(--fs-3xs); }
+.monitoring-home .carrier-row-sub { grid-column: 1 / -1; }
+.monitoring-home .node-card-foot {
+  gap: 8px;
+  padding-top: 2px;
+  font-size: var(--fs-2xs);
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+/* 下半部分析双栏（流量分布 + 全网三网质量） */
+.monitor-analysis { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+.monitor-analysis > .panel, .monitor-carrier-panel { min-width: 0; padding: 20px 22px; }
+.monitoring-home .traffic-list { max-height: 360px; overflow-y: auto; padding-right: 4px; gap: 6px; }
+.monitoring-home .traffic-row {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(105px, 1fr) minmax(45px, 1.35fr) 82px;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  text-align: left;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.monitoring-home .traffic-row:hover {
+  background: var(--surface-2);
+  border-color: var(--line-soft);
+}
+.monitoring-home .traffic-row .traffic-name { font-size: var(--fs-xs); color: var(--text-dim); font-weight: 500; }
+.monitoring-home .traffic-row > strong { font: 500 var(--fs-xs) var(--mono); color: var(--text); text-align: right; font-variant-numeric: tabular-nums; }
+.monitoring-home .traffic-track { height: 8px; background: var(--surface-3); border-radius: 999px; overflow: hidden; }
+.monitoring-home .traffic-total {
+  display: block;
+  height: 100%;
+  margin: 0;
+  background: linear-gradient(90deg, var(--monitor-bar), var(--accent));
+  border-radius: 999px;
+}
+.traffic-tooltip {
+  display: none;
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  padding: 9px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-3);
+  box-shadow: var(--shadow-sm);
+  font-size: var(--fs-2xs);
+  color: var(--text-soft);
+  pointer-events: none;
+}
+.traffic-tooltip b { font-weight: 600; color: var(--text); font-family: var(--mono); }
+.monitoring-home .traffic-row:hover .traffic-tooltip, .monitoring-home .traffic-row:focus-visible .traffic-tooltip { display: grid; gap: 4px; }
+.monitoring-home .traffic-row:hover .traffic-total { filter: brightness(1.1); }
+
+.monitoring-home .carrier-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.monitoring-home .carrier-card {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  min-width: 0;
+  transition: border-color .15s;
+}
+.monitoring-home .carrier-card:hover { border-color: var(--line-strong); }
+.monitoring-home .carrier-value { font-family: var(--mono); font-size: 26px; color: var(--text); }
+.monitoring-home .carrier-value.lat-none { font-family: var(--sans); font-size: var(--fs-lg); color: var(--muted); }
+.monitoring-home .carrier-meta { overflow-wrap: anywhere; }
+.monitoring-home .form-note-hint { line-height: 1.65; }
+
+/* 节点监控列表视图（修复未指定字色导致的黑底黑字） */
+.monitor-table-scroll {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-card);
+}
+.monitor-table {
+  width: 100%;
+  min-width: 1050px;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: var(--fs-xs);
+  color: var(--text-soft);
+}
+.monitor-table th {
+  padding: 12px 16px;
+  font: 500 var(--fs-2xs) var(--mono);
+  letter-spacing: .03em;
+  color: var(--muted);
+  background: rgb(var(--text-rgb) / .02);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+.monitor-table td {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--text-soft);
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+}
+.monitor-table tbody tr { transition: background .14s ease; }
+.monitor-table tbody tr:last-child td { border-bottom: 0; }
+.monitor-table tbody tr:hover { background: rgb(var(--text-rgb) / .03); }
+.monitor-table td:first-child { min-width: 210px; max-width: 310px; }
+.monitor-table .node-card-reason { margin-top: 8px; max-width: 275px; }
+.monitor-node-link, .monitor-details {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.monitor-node-link { display: flex; align-items: center; gap: 7px; font-size: var(--fs-sm); font-weight: 600; }
+.monitor-node-link:hover, .monitor-details:hover { color: var(--accent); }
+.monitor-node-meta { display: block; margin-top: 4px; color: var(--muted); font-size: var(--fs-2xs); font-family: var(--mono); line-height: 1.5; }
+.monitor-table-resources { display: grid; gap: 8px; min-width: 70px; }
+.monitor-table-resources .monitor-resource { grid-template-columns: 40px 52px; align-items: center; }
+.monitor-table-resources strong { font-size: var(--fs-xs); }
+.monitor-table-carriers { display: grid; grid-template-columns: repeat(2, minmax(75px, 1fr)); gap: 6px 12px; font-family: var(--mono); }
+.monitor-table-carriers span { white-space: nowrap; }
+.monitor-table-carriers small { font-family: var(--sans); color: var(--muted); margin-right: 5px; font-size: var(--fs-3xs); }
+.monitor-table-traffic { display: grid; gap: 5px; white-space: nowrap; font-family: var(--mono); color: var(--text-dim); }
+.monitor-table-traffic small { color: var(--muted); font-size: var(--fs-2xs); }
+.monitor-details { display: inline-block; margin-top: 8px; color: var(--muted); font-size: var(--fs-2xs); }
+
+@media (max-width: 1450px) {
+  .monitoring-home .monitoring-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .monitoring-home .metric-card:nth-child(4) { border-left: 0; }
+  .monitoring-home .metric-card:nth-child(n+4) { border-top: 1px solid var(--line-soft); }
+}
+@media (max-width: 1000px) {
+  .monitor-analysis { grid-template-columns: minmax(0, 1fr); }
+  .monitoring-home .monitor-heading { align-items: flex-start; }
+  .monitoring-home .heading-actions { flex-wrap: wrap; }
+  .monitoring-home .updated-label { display: none; }
+}
+@media (max-width: 600px) {
+  .monitoring-home { gap: 16px; }
+  .monitoring-home .monitor-heading { flex-direction: column; align-items: stretch; gap: 12px; }
+  .monitoring-home .monitor-heading h1 { font-size: 26px; }
+  .monitoring-home .monitoring-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monitoring-home .metric-card { padding: 14px; min-height: 106px; }
+  .monitoring-home .metric-card:nth-child(n) { border-left: 0; }
+  .monitoring-home .metric-card:nth-child(2n) { border-left: 1px solid var(--line-soft); }
+  .monitoring-home .metric-card:nth-child(n+3) { border-top: 1px solid var(--line-soft); }
+  .monitoring-home .metric-body strong { font-size: 22px; }
+  .monitoring-home .monitor-online .metric-body strong { font-size: 26px; }
+  .monitoring-home .monitor-list-tools { width: 100%; }
+  .monitoring-home .monitor-search { flex: 1 1 100%; width: 100%; min-width: 0; }
+  .monitoring-home .monitor-search input { width: 100%; }
+  .monitoring-home .monitor-list-tools select { flex: 1 1 calc(50% - 4px); min-width: 0; }
+  .monitoring-home .node-card { padding: 15px; }
+  .monitor-analysis > .panel { padding: 16px; }
+  .monitoring-home .traffic-row { grid-template-columns: minmax(86px, 1fr) minmax(30px, 1fr) 72px; gap: 8px; padding: 7px 6px; }
+  .monitoring-home .monitor-view button { padding: 0 9px; }
+}
+@media (forced-colors: active) {
+  .monitoring-home .traffic-total, .monitor-resource-track i { background: Highlight; }
+  .monitor-status { border: 1px solid currentColor; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .monitoring-home * { transition: none !important; animation: none !important; }
+}
+
+/* 三网质量趋势（ChinaQualityTrend.tsx） */
+.cq-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.cq-ranges {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.cq-ranges button {
+  height: 26px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-2xs);
+  cursor: pointer;
+  transition: background .14s, color .14s;
+}
+.cq-ranges button:hover:not(.active) { color: var(--text); }
+.cq-ranges button.active {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-3));
+  color: var(--accent);
+  font-weight: 600;
+}
+.cq-body { transition: opacity .16s; }
+.cq-loading { opacity: .55; }
+.cq-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 12px 0 8px; }
+.cq-summary > div {
+  display: grid;
+  gap: 3px;
+  padding: 9px 11px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+.cq-summary span { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: var(--fs-2xs); }
+.cq-summary span i { width: 8px; height: 2px; border-radius: 1px; }
+.cq-summary strong { font: 600 var(--fs-md) var(--mono); color: var(--text); font-variant-numeric: tabular-nums; }
+.cq-summary small { color: var(--faint); font: var(--fs-3xs) var(--mono); }
+.cq-label { margin-top: 8px; color: var(--faint); font-size: var(--fs-2xs); }
+.cq-chart { display: block; width: 100%; height: 120px; }
+.cq-grid { stroke: var(--line-soft); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.cq-axis { fill: var(--faint); font: 9.5px var(--mono); }
+@media (max-width: 560px) { .cq-summary { grid-template-columns: 1fr; } }
+
+/* 节点卡片三网质量：一家一行，内嵌柔和底板提升对齐与扫描效率 */
+.node-card-quality {
+  display: grid;
+  gap: 7px;
+  padding: 11px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  background: rgb(var(--text-rgb) / .018);
+}
+.quality-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 76px; align-items: center; gap: 10px; font-size: var(--fs-xs); }
+.quality-name { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+.quality-ms { font-family: var(--mono); font-weight: 500; color: var(--text-dim); text-align: right; font-variant-numeric: tabular-nums; }
+.quality-loss { font-family: var(--mono); font-size: var(--fs-2xs); text-align: right; font-variant-numeric: tabular-nums; }
+.node-card-quality .carrier-row-sub { font-size: var(--fs-3xs); color: var(--faint); line-height: 1.5; }
+.node-card-foot .foot-users { margin-left: auto; }
+.node-card-foot { flex-wrap: wrap; }
