@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -43,11 +44,17 @@ const (
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	// 抽离执行体返回错误，确保失败路径退出前同样执行 defer unlock() 与 defer pool.Close()。
+	if err := runMain(logger); err != nil {
+		logger.Error("migration runner exited with error", "error", err)
+		os.Exit(1)
+	}
+}
 
+func runMain(logger *slog.Logger) error {
 	dsn := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if dsn == "" {
-		logger.Error("DATABASE_URL is not set")
-		os.Exit(1)
+		return errors.New("DATABASE_URL is not set")
 	}
 	dir := strings.TrimSpace(os.Getenv("MIGRATIONS_DIR"))
 	if dir == "" {
@@ -58,7 +65,8 @@ func main() {
 	// database that predates the ledger.
 	assumeBaseline := strings.TrimSpace(os.Getenv("MIGRATE_ASSUME_BASELINE")) == "true"
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// 总超时须大于单文件语句超时（migrationStatementTimeout=10min），避免长耗时索引迁移被外层提前掐断。
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 
 	// Migration files are multi-statement SQL (001_init.sql alone creates a dozen
@@ -69,23 +77,20 @@ func main() {
 	// runs each statement itself. That is exactly what a migration runner wants.
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		logger.Error("database configuration failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("database configuration failed: %w", err)
 	}
 	poolCfg.ConnConfig.DefaultQueryExecMode = pgx.QueryExecModeSimpleProtocol
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
-		logger.Error("database pool failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("database pool failed: %w", err)
 	}
 	defer pool.Close()
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, connectTimeout)
 	if err := pool.Ping(pingCtx); err != nil {
 		pingCancel()
-		logger.Error("database connection failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("database connection failed: %w", err)
 	}
 	pingCancel()
 
@@ -94,14 +99,13 @@ func main() {
 	// 第二个的台账写入被 ON CONFLICT 静默吞掉 —— 非幂等的数据修正就执行了两次。
 	unlock, err := acquireMigrationLock(ctx, pool)
 	if err != nil {
-		logger.Error("migration lock failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("migration lock failed: %w", err)
 	}
 	defer unlock()
 	if err := run(ctx, logger, pool, dir, assumeBaseline); err != nil {
-		logger.Error("migration failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("migration failed: %w", err)
 	}
+	return nil
 }
 
 // migrationLockKey 是迁移器专用的 advisory 锁键（任意固定值，只要不与业务锁冲突）。
@@ -162,12 +166,7 @@ func run(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, dir strin
 		}
 	}
 
-	pending := make([]migrationFile, 0, len(files))
-	for _, f := range files {
-		if _, ok := applied[f.version]; !ok {
-			pending = append(pending, f)
-		}
-	}
+	pending := selectPendingMigrations(files, applied)
 	if len(pending) == 0 {
 		logger.Info("database schema is up to date", "applied", len(applied))
 		return nil
@@ -227,6 +226,44 @@ func migrationFiles(dir string) ([]migrationFile, error) {
 		}
 	}
 	return files, nil
+}
+
+// canonicalVersion 将纯数字版本号归一为无前导零形态（全零归一为 "0"），
+// 与 compareVersion 同口径，避免台账记录 "053" 与文件 "53_xxx.sql" 等价却被误判为未执行。
+func canonicalVersion(v string) string {
+	trimmed := strings.TrimSpace(v)
+	if trimmed == "" {
+		return ""
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return trimmed
+		}
+	}
+	stripped := strings.TrimLeft(trimmed, "0")
+	if stripped == "" {
+		return "0"
+	}
+	return stripped
+}
+
+// selectPendingMigrations 筛选尚未执行的迁移文件，同时按原版本串与数值等价版本串比对台账。
+func selectPendingMigrations(files []migrationFile, applied map[string]struct{}) []migrationFile {
+	appliedCanonical := make(map[string]struct{}, len(applied))
+	for v := range applied {
+		appliedCanonical[canonicalVersion(v)] = struct{}{}
+	}
+	pending := make([]migrationFile, 0, len(files))
+	for _, f := range files {
+		if _, ok := applied[f.version]; ok {
+			continue
+		}
+		if _, ok := appliedCanonical[canonicalVersion(f.version)]; ok {
+			continue
+		}
+		pending = append(pending, f)
+	}
+	return pending
 }
 
 // compareVersion 比较两个纯数字版本号的数值大小，忽略前导零差异（例如 053 与 53 视为同号，999 < 1000）。
@@ -350,6 +387,8 @@ func applyFile(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, f m
 	if err != nil {
 		return fmt.Errorf("read %s: %w", f.name, err)
 	}
+	// 去除可能误混入迁移文件的 UTF-8 BOM 字节，防止 PostgreSQL 解析首句时触发语法错误。
+	body = stripUTF8BOM(body)
 	if strings.TrimSpace(string(body)) == "" {
 		logger.Warn("skipping empty migration", "file", f.name)
 		return recordVersion(ctx, pool, f.version, f.name)
@@ -385,6 +424,12 @@ func applyFile(ctx context.Context, logger *slog.Logger, pool *pgxpool.Pool, f m
 	}
 	logger.Info("migration applied", "version", f.version, "file", f.name)
 	return nil
+}
+
+var utf8BOM = []byte{0xef, 0xbb, 0xbf}
+
+func stripUTF8BOM(raw []byte) []byte {
+	return bytes.TrimPrefix(raw, utf8BOM)
 }
 
 const (

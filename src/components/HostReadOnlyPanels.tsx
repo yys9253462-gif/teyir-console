@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { api, type HostContainer, type HostComposeProject, type HostFileList, type HostFilePreview } from '../lib/api'
+import { formatBytes } from '../lib/format'
 import { parentDirectory } from '../lib/hostOpsLifecycle'
 import { HostOpsError, HostOpsTable, hostOpsError } from './HostOpsView'
 
@@ -79,7 +80,11 @@ export function HostFilesPanel({ serverId }: { serverId: string }) {
     {loading && <p role="status">正在读取…</p>}
     {listing?.truncated && <p role="status">目录条目超过 2000，仅显示前 2000 项。</p>}
     {listing && <HostOpsTable columns={['名称', '类型', '大小', '权限', '修改时间']} rows={listing.entries.map((entry) => [
-      <button type="button" className="host-file-link" disabled={loading || (entry.type !== 'directory' && entry.type !== 'file')} title={entry.type === 'symlink' || entry.type === 'other' ? '不支持预览链接或特殊文件' : undefined} onClick={() => void load(entry.path, entry.type !== 'directory')}>{entry.name}</button>, ({ directory: '目录', file: '文件', symlink: '链接', other: '特殊文件' })[entry.type], entry.type === 'directory' ? '—' : `${entry.size} B`, entry.mode, entry.modified_at,
+      <button type="button" className="host-file-link" disabled={loading || (entry.type !== 'directory' && entry.type !== 'file')} title={entry.type === 'symlink' || entry.type === 'other' ? '不支持预览链接或特殊文件' : undefined} onClick={() => void load(entry.path, entry.type !== 'directory')}>{entry.name}</button>,
+      ({ directory: '目录', file: '文件', symlink: '链接', other: '特殊文件' })[entry.type] ?? entry.type,
+      entry.type === 'directory' ? '—' : <span title={`${entry.size} B`}>{formatBytes(entry.size)}</span>,
+      entry.mode,
+      entry.modified_at,
     ])} empty="空目录" />}
     {preview && <section aria-label="文本预览"><p>{preview.path}{preview.truncated ? ' · 已截断，仅展示部分内容' : ''}</p><pre className="host-ops-preview">{preview.content.slice(0, 65536)}</pre>{preview.content.length > 65536 && <p>浏览器预览上限 64 Ki 字符，剩余内容未显示。</p>}</section>}
   </div>

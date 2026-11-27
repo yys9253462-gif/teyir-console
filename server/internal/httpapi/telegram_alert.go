@@ -33,8 +33,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"nodeops/server/internal/ippurity"
 )
 
 // telegramAlertActionTTL 是处置动作登记的有效期。
@@ -263,7 +261,7 @@ ORDER BY name, id LIMIT 4`, serverID)
 // （丢了就是「面板知道、运维不知道」）。
 // 告警推送本身已有 15 秒预算，一次退避重试（约 2 秒）完全塞得下。
 func (s *Server) sendTelegramRich(ctx context.Context, chat, text string, rows [][]map[string]string) error {
-	token := s.purityKeys.Get(ippurity.KeyTelegram)
+	token := s.telegramToken()
 	if token == "" || chat == "" {
 		return errors.New("未配置 Telegram Bot Token 或 Chat ID")
 	}

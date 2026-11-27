@@ -247,8 +247,12 @@ func (s *Server) bumpPendingNodeAction(ctx context.Context, subID, reason string
 }
 
 // revokeExpiredInBackground 拉订阅/打开交付页时发现已过期，就把回收放到后台做，请求立刻返回。
-// 同一订阅同时只跑一个；sweeper 每 2 分钟也会兜底，所以这里失败不需要再记待办。
-var expiredRevokeInFlight sync.Map
+// 同一订阅同时只跑一个，且全局受有界并发槽限制，避免大批过期请求同时触发时耗尽全局订阅锁槽位；
+// 满槽直接跳过，交由每 2 分钟一次的过期清扫任务兜底。
+var (
+	expiredRevokeInFlight sync.Map
+	expiredRevokeSem      = make(chan struct{}, 4)
+)
 
 func (s *Server) revokeExpiredInBackground(rec *subscriptionRecord) {
 	if rec == nil {
@@ -257,9 +261,21 @@ func (s *Server) revokeExpiredInBackground(rec *subscriptionRecord) {
 	if _, busy := expiredRevokeInFlight.LoadOrStore(rec.ID, struct{}{}); busy {
 		return
 	}
+	select {
+	case expiredRevokeSem <- struct{}{}:
+	default:
+		expiredRevokeInFlight.Delete(rec.ID)
+		return
+	}
 	snapshot := *rec
 	go func() {
-		defer expiredRevokeInFlight.Delete(snapshot.ID)
+		defer func() {
+			if r := recover(); r != nil && s.logger != nil {
+				s.logger.Error("subscription: 过期后台回收协程发生异常", "subscription", shortID(snapshot.ID), "panic", r)
+			}
+			<-expiredRevokeSem
+			expiredRevokeInFlight.Delete(snapshot.ID)
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*provisionTimeout)
 		defer cancel()
 		outcome := s.revokeSubscriptionAccounts(ctx, &snapshot)

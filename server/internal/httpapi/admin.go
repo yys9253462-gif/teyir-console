@@ -32,7 +32,11 @@ func (s *Server) updateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nodeID := r.PathValue("id")
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
+	}
 	var prevInStore, hasNodeAPI, hasPortalBasic bool
 	var prevServerID, prevDomain string
 	var prevPort int

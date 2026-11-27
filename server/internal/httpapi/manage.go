@@ -1048,7 +1048,11 @@ func (s *Server) deleteNode(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": "删除节点需要 X-Confirm-Dangerous: yes"})
 		return
 	}
-	nodeID := r.PathValue("id")
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
+	}
 	// 2026-11-04：主机正在安装 / 迁移时拒绝删除（与绑定 / 解绑同一判据）。此时 loadPortalTarget
 	// 会拒绝 ⇒ 取不到凭据快照 ⇒ 每个买家账号都回收失败；随后软删除抹掉 api_url/api_key，
 	// 登记的待补删记录也没有密钥 ——「补删」永远无法执行。迁移任务还会继续改写这台已删除的节点。

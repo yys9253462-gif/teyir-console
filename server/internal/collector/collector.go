@@ -277,10 +277,17 @@ LEFT JOIN LATERAL (
 					c.logger.Error("collector: 采集主机时 panic", "server", t.name, "panic", r, "stack", string(debug.Stack()))
 				}
 			}()
+			// 阶段预算已结束时不进入 select，避免通道有空位时伪随机放行排队主机并立刻撞超时。
+			if hostStageCtx.Err() != nil {
+				return
+			}
 			select {
 			case slots <- struct{}{}:
 				defer func() { <-slots }()
 			case <-hostStageCtx.Done():
+				return
+			}
+			if hostStageCtx.Err() != nil {
 				return
 			}
 			c.collectServer(hostStageCtx, t)
@@ -340,6 +347,12 @@ func (c *Collector) collectServer(parent context.Context, t target) {
 		if errors.Is(parent.Err(), context.Canceled) {
 			return
 		}
+		// 外层主机采集阶段总预算耗尽说明本轮并发排队时间不足，不是该主机宕机；
+		// 绝不能据此标成 offline 或再开 12 秒降级探测挤占后半段用量采集预算。
+		if errors.Is(parent.Err(), context.DeadlineExceeded) {
+			c.logger.Warn("collector: 本轮主机阶段预算已用尽，跳过该主机状态改写", "server", t.name, "error", err)
+			return
+		}
 		// SSH 连不上。这里要分两种情况，处理方式完全不同：
 		//
 		//   A. **认证失败**（密钥/密码不对）—— 网络是通的、机器是活的，
@@ -364,7 +377,7 @@ func (c *Collector) collectServer(parent context.Context, t target) {
 			c.logger.Warn("collector: SSH 失败后查询节点 API 绑定失败，本轮不改状态", "server", t.name, "ssh_error", err, "error", apiErr)
 			recordCtx, stopRecord := detachedWriteContext(hostCtx, 2*time.Second)
 			defer stopRecord()
-			if _, dbErr := c.db.Exec(recordCtx, `UPDATE servers SET status_error=$2, updated_at=now() WHERE id=$1`, t.id, sshDialFailureReason(err)); dbErr != nil {
+			if _, dbErr := c.db.Exec(recordCtx, `UPDATE servers SET status_error=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, t.id, sshDialFailureReason(err)); dbErr != nil {
 				c.logger.Warn("collector: record ssh failure failed", "server", t.name, "error", dbErr)
 			}
 			return
@@ -427,6 +440,10 @@ func (c *Collector) collectServer(parent context.Context, t target) {
 		if errors.Is(parent.Err(), context.Canceled) {
 			return
 		}
+		if errors.Is(parent.Err(), context.DeadlineExceeded) {
+			c.logger.Warn("collector: 本轮主机阶段预算已用尽，跳过指标失败计数", "server", t.name, "error", err)
+			return
+		}
 		// ⚠️ 2026-10-24 审计 P0-2：这里原来无条件置 warning，下一轮成功又置回
 		// online，而告警评估对每次 warning↔online 都新开一条 server_warning、
 		// 恢复时再 resolve 一条 —— 一次 SSH 抖动 = 开一条 + 关一条。
@@ -475,6 +492,10 @@ UPDATE servers
 	values := parseKeyValues(stdout)
 	if values["KERNEL"] == "" {
 		if errors.Is(parent.Err(), context.Canceled) {
+			return
+		}
+		if errors.Is(parent.Err(), context.DeadlineExceeded) {
+			c.logger.Warn("collector: 本轮主机阶段预算已用尽，跳过不完整指标计数", "server", t.name)
 			return
 		}
 		var fails int

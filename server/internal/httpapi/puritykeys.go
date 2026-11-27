@@ -68,8 +68,13 @@ func (s *Server) purityKeysGet(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{}
 	for name := range purityKeySettings {
-		key := s.purityKeys.Get(name)
-		entry := map[string]any{"configured": key != "", "source": s.purityKeys.Source(name)}
+		key := ""
+		source := ""
+		if s.purityKeys != nil {
+			key = s.purityKeys.Get(name)
+			source = s.purityKeys.Source(name)
+		}
+		entry := map[string]any{"configured": key != "", "source": source}
 		if key != "" {
 			entry["masked"] = maskKey(key)
 		}

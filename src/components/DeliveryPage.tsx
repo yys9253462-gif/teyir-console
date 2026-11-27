@@ -134,16 +134,21 @@ export function DeliveryPage({ token }: { token: string }) {
     setRenewOpen(false)
     void load()
   }, [load])
-  // 2026-11-06：暂时读不到（503：服务重启、节点开户中）时每 60 秒自动重试一次，直到读到或确认不存在。
-  // 客户多半不会想到去点「重试」，而开户通常一两分钟内就完成。
+  // 2026-11-06：暂时读不到（503：服务重启、节点开户中）时每 60 秒自动重试一次，直到读到或确认不存在；
+  // 客户从后台切回前台时立即补重试，不必空等下一轮 60 秒。
   const [retryTick, setRetryTick] = useState(0)
   useEffect(() => {
     if (view || gone || !error) return
     const t = window.setTimeout(() => {
       if (!document.hidden) void load()
-      setRetryTick((n) => n + 1) // 无论这一轮是否发请求，都排下一轮（标签页在后台时只是跳过）
+      setRetryTick((n) => n + 1)
     }, 60_000)
-    return () => window.clearTimeout(t)
+    const onVisible = () => { if (!document.hidden) void load() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.clearTimeout(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [view, gone, error, load, retryTick])
 
   async function copy(label: string, value: string) {
@@ -164,18 +169,19 @@ export function DeliveryPage({ token }: { token: string }) {
     uri: view?.uri_url,
   }
 
-  // 二维码线路：扫码导入后客户端会一直用这个地址更新，所以默认放最抗封的线路。
-  // 2026-10-28 起交付域名本身就是走 CDN 的域名，主线路排第一并默认选中，备用线路排在后面。
-  // 备用链接只给了通用地址，这里把 uri_url 的协议与域名同步替换为备用地址得到同一令牌的通用订阅地址。
+  // 二维码线路：主线路与备用线路均需经 safeHttpUrl 协议校验，禁止非法协议进入二维码。
   const qrLines = useMemo(() => {
     const lines: { label: string; url: string }[] = []
-    const main = view?.uri_url
+    const main = safeHttpUrl(view?.uri_url)
     if (!main) return lines
     lines.push({ label: '主线路', url: main })
     ;(view?.backup_subscription_urls ?? []).forEach((backup, index) => {
+      const safeBackup = safeHttpUrl(backup)
+      if (!safeBackup) return
       try {
         const url = new URL(main)
-        const parsedBackup = new URL(backup)
+        const parsedBackup = new URL(safeBackup)
+        if (parsedBackup.protocol !== 'https:' && parsedBackup.protocol !== 'http:') return
         url.protocol = parsedBackup.protocol
         url.host = parsedBackup.host
         lines.push({ label: `备用线路${index + 1}`, url: url.href })
@@ -368,7 +374,13 @@ export function DeliveryPage({ token }: { token: string }) {
                 {qrLines.length > 1 && (
                   <div className="sub-format-tabs">
                     {qrLines.map((line, index) => (
-                      <button key={line.url} className={`button button-compact ${safeQrIndex === index ? 'button-primary' : 'button-quiet'}`} onClick={() => setQrIndex(index)}>
+                      <button
+                        type="button"
+                        key={`${index}-${line.url}`}
+                        aria-pressed={safeQrIndex === index}
+                        className={`button button-compact ${safeQrIndex === index ? 'button-primary' : 'button-quiet'}`}
+                        onClick={() => setQrIndex(index)}
+                      >
                         {line.label}
                       </button>
                     ))}
@@ -407,7 +419,7 @@ export function DeliveryPage({ token }: { token: string }) {
                   {(view.backup_subscription_urls ?? []).map((url, index) => {
                     const key = `备用链接${index + 1}`
                     return (
-                      <div className="sub-link-row" key={url}>
+                      <div className="sub-link-row" key={`${index}-${url}`}>
                         <input className="sub-link-input" value={url} readOnly onFocus={(event) => event.currentTarget.select()} spellCheck={false} aria-label={key} />
                         <button className="button button-quiet button-compact" onClick={() => void copy(key, url)}>
                           {copied === key ? <Check size={13} /> : <Copy size={13} />}复制备用{index + 1}
@@ -426,7 +438,13 @@ export function DeliveryPage({ token }: { token: string }) {
               </div>
               <div className="sub-format-tabs">
                 {FORMATS.map((item) => (
-                  <button key={item.key} className={`button button-compact ${format === item.key ? 'button-primary' : 'button-quiet'}`} onClick={() => setFormat(item.key)}>
+                  <button
+                    type="button"
+                    key={item.key}
+                    aria-pressed={format === item.key}
+                    className={`button button-compact ${format === item.key ? 'button-primary' : 'button-quiet'}`}
+                    onClick={() => setFormat(item.key)}
+                  >
                     {item.label}
                   </button>
                 ))}

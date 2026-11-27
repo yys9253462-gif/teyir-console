@@ -17,15 +17,14 @@ export default defineConfig({
     if (id.includes('node_modules')) {
       if (id.includes('@xterm')) return 'terminal-vendor'
       if (id.includes('lucide-react')) return 'icons'
-      if (id.includes('/react/') || id.includes('/react-dom/') || id.includes('/scheduler/')) return 'react-vendor'
+      if (/[/\\](react|react-dom|scheduler)[/\\]/.test(id)) return 'react-vendor'
     }
   } } } },
   server: {
     proxy: {
       '/api': {
         target: apiProxyTarget,
-        // SSH terminal uses a same-origin WebSocket; preserve the browser Host
-        // so the API can compare it with Origin without trusting forwarded input.
+        // SSH 终端走同源 WebSocket；保留浏览器 Host 头以便后端与 Origin 核验而不轻信转发头。
         changeOrigin: false,
         ws: true,
       },

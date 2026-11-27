@@ -50,6 +50,9 @@ type ipqsResponse struct {
 }
 
 func (p IPQS) Lookup(ctx context.Context, client *http.Client, ip string) (*Verdict, error) {
+	if client == nil {
+		client = safeClient
+	}
 	key := strings.TrimSpace(p.Keys.Get(KeyIPQS))
 	if key == "" {
 		return nil, ErrNoKey

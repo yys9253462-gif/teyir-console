@@ -8,6 +8,7 @@ package cloudflare
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,8 +27,15 @@ const (
 	maxDNSRecordPages = 100
 )
 
-// defaultHTTPClient 在未注入自定义客户端时复用默认传输层连接池，避免每次请求新建客户端对象。
-var defaultHTTPClient = &http.Client{Timeout: 15 * time.Second}
+// defaultHTTPClient 在未注入自定义客户端时复用安全传输层连接池，禁用重定向并强制 TLS 1.2 以上。
+var defaultHTTPClient = &http.Client{
+	Timeout:       15 * time.Second,
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	Transport: &http.Transport{
+		TLSHandshakeTimeout: 10 * time.Second,
+		TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
+	},
+}
 
 type Client struct {
 	Token string
@@ -76,6 +84,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 		return nil, errors.New("连接 Cloudflare 失败")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= http.StatusMultipleChoices && resp.StatusCode < http.StatusBadRequest {
+		return nil, fmt.Errorf("Cloudflare 返回重定向（HTTP %d），已拒绝跟随", resp.StatusCode)
+	}
 	var env envelope
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&env); err != nil {
 		return nil, fmt.Errorf("Cloudflare 返回 %d，无法解析", resp.StatusCode)
@@ -94,6 +105,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any) (json.Ra
 			return nil, fmt.Errorf("Cloudflare 报错（HTTP %d）", resp.StatusCode)
 		}
 		return nil, fmt.Errorf("Cloudflare 报错：%s", strings.Join(msgs, "；"))
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("Cloudflare 返回异常状态码（HTTP %d）", resp.StatusCode)
 	}
 	return env.Result, nil
 }
@@ -152,9 +166,9 @@ func (r UpsertResult) Warning() string {
 // （原来只改第一条，剩下的旧 IP 仍会被轮询返回）。AAAA 记录不动，但在结果里报出来。
 func (c *Client) UpsertARecords(ctx context.Context, domain, ip string) (UpsertResult, error) {
 	var out UpsertResult
-	domain = strings.TrimSuffix(strings.TrimSpace(domain), ".")
-	if domain == "" {
-		return out, errors.New("域名不能为空")
+	domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if domain == "" || strings.HasPrefix(domain, ".") || strings.Contains(domain, "..") || strings.ContainsAny(domain, " \t\r\n") {
+		return out, errors.New("域名不能为空或包含非法空白/连续点号")
 	}
 	ip = strings.TrimSpace(ip)
 	parsed := net.ParseIP(ip)
@@ -171,6 +185,26 @@ func (c *Client) UpsertARecords(ctx context.Context, domain, ip string) (UpsertR
 	records, err := c.listDNSRecords(ctx, zoneID, domain, "A")
 	if err != nil {
 		return out, err
+	}
+	// 当存在多条同名 A 记录且目标 IP 已位于后续记录时，优先保留匹配目标 IP（且未开代理）的那条作为首条：
+	// 既避免先把 records[0] 改写成已存在的目标 IP 触发 Cloudflare 81058 重复记录报错，也能减少不必要的写请求并保留其备注标签。
+	if len(records) > 1 {
+		best := -1
+		for i, r := range records {
+			if r.Content != ip {
+				continue
+			}
+			if !r.Proxied {
+				best = i
+				break
+			}
+			if best == -1 {
+				best = i
+			}
+		}
+		if best > 0 {
+			records[0], records[best] = records[best], records[0]
+		}
 	}
 	body := map[string]any{"type": "A", "name": domain, "content": ip, "ttl": 60, "proxied": false}
 	switch {

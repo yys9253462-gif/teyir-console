@@ -21,6 +21,8 @@ func TestCountryFromRDAP(t *testing.T) {
 		]}`, "SE"},
 		// abuse 联系人在美国，但不能拿它当注册国。
 		{"arin-ignores-abuse-only", `{"entities":[{"roles":["abuse"],"vcardArray":["vcard",[["adr",{"label":"Seattle\nUnited States"},"text",["","","","","","",""]]]]}]}`, ""},
+		// 嵌套实体中的 registrant 也能被递归提取。
+		{"nested-registrant", `{"entities":[{"roles":["technical"],"entities":[{"roles":["registrant"],"vcardArray":["vcard",[["adr",{"label":"Tokyo\nJapan"},"text",["","","","","","",""]]]]}]}]}`, "JP"},
 	}
 	for _, c := range cases {
 		var n rdapNetwork

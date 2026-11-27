@@ -509,7 +509,7 @@ WHERE s.id = $1::uuid AND s.deleted_at IS NULL`, serverID).Scan(&host, &port, &u
 	if err := usableProbeResults(results); err != nil {
 		return written, err
 	}
-	if written > 0 {
+	if written > 0 && p.logger != nil {
 		p.logger.Info("speedtest: 完成", "server", serverID, "nodes", len(nodeIDs),
 			"targets", len(results), "rows", written, "round", roundID)
 	}
@@ -543,8 +543,10 @@ ON CONFLICT DO NOTHING`,
 				nodeID, serverID, r.TargetKey, r.Name, r.Host, r.Carrier,
 				r.ICMPAvgMs, r.ICMPLossPct, r.ProbeOK, r.ProbeError, roundID)
 			if err != nil {
-				p.logger.Warn("speedtest: 写入结果失败",
-					"node", nodeID, "target", r.TargetKey, "error", err)
+				if p.logger != nil {
+					p.logger.Warn("speedtest: 写入结果失败",
+						"node", nodeID, "target", r.TargetKey, "error", err)
+				}
 				if firstErr == nil {
 					firstErr = err
 				}
@@ -584,8 +586,10 @@ func (p *Prober) RunOnPortalAndStore(ctx context.Context, nodeID, serverID, base
 	if written == 0 {
 		return errors.New("结果未写入数据库（全部冲突或写入失败）")
 	}
-	p.logger.Info("speedtest: portal 通道完成", "node", nodeID, "server", serverID,
-		"targets", len(results), "rows", written, "round", roundID)
+	if p.logger != nil {
+		p.logger.Info("speedtest: portal 通道完成", "node", nodeID, "server", serverID,
+			"targets", len(results), "rows", written, "round", roundID)
+	}
 	return nil
 }
 
@@ -616,11 +620,17 @@ func (p *Prober) LoadTargets(ctx context.Context) ([]Target, error) {
 	return p.loadTargets(ctx)
 }
 
+// truncate 按 Unicode 字符数安全截断并清洗无效 UTF-8 字节，避免切坏中文导致数据库写入报 22021 编码错。
 func truncate(s string, max int) string {
-	if len(s) <= max {
+	s = strings.ToValidUTF8(s, "")
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= max {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:max]) + "…"
 }
 
 // newUUID 生成一个 RFC 4122 v4 UUID。
@@ -657,6 +667,13 @@ func (d *netDialer) DialContext(ctx context.Context, network, address string) (n
 // 展示会误导（SSH 端口被封的节点显示无延迟，但它的代理可能好得很）。
 // 这里单独测一次 TCP 建连，给"节点监控"页提供语义正确的网络延迟。
 func DialOnly(ctx context.Context, host string, port int, timeout time.Duration) (int, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return 0, errors.New("主机地址不能为空")
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("端口号不合法: %d", port)
+	}
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}

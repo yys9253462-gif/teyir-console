@@ -51,9 +51,10 @@ func (s *Server) startMigrateNode(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := strings.TrimSpace(r.PathValue("id"))
-	if norm, ok := canonicalUUID(nodeID); ok {
-		nodeID = norm
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
 	}
 	var in migrateRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<12)).Decode(&in); err != nil || strings.TrimSpace(in.TargetServerID) == "" {
@@ -74,6 +75,11 @@ func (s *Server) startMigrateNode(w http.ResponseWriter, r *http.Request) {
 	in.Email = strings.TrimSpace(in.Email)
 	if !validCertEmail(in.Email) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "邮箱格式不正确"})
+		return
+	}
+	// 与一键安装保持一致：在抢占双主机租约并拷贝敏感目录前校验安装脚本来源，避免先污染目标主机再失败。
+	if _, err := hy2InstallScriptURL(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
 		return
 	}
 

@@ -341,23 +341,27 @@ func (s *Server) excludedInScopeChecked(ctx context.Context, excluded []subscrip
 		listed = map[string]bool{}
 		ids := make([]string, 0, len(excluded))
 		for _, e := range excluded {
-			ids = append(ids, e.NodeID)
+			if norm, ok := canonicalUUID(e.NodeID); ok {
+				ids = append(ids, norm)
+			}
 		}
-		rows, err := s.db.Query(ctx, `SELECT id::text FROM hysteria_nodes WHERE id::text = ANY($1) AND in_store`, ids)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
+		if len(ids) > 0 {
+			rows, err := s.db.Query(ctx, `SELECT id::text FROM hysteria_nodes WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND in_store`, ids)
+			if err != nil {
 				return nil, err
 			}
-			listed[id] = true
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			return nil, rows.Err()
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return nil, err
+				}
+				listed[id] = true
+			}
+			rows.Close()
+			if rows.Err() != nil {
+				return nil, rows.Err()
+			}
 		}
 	}
 	out := make([]subscriptionExcluded, 0, len(excluded))
@@ -395,23 +399,27 @@ func (s *Server) hasScopedExcludedNode(ctx context.Context, excluded []subscript
 		listed = map[string]bool{}
 		ids := make([]string, 0, len(excluded))
 		for _, e := range excluded {
-			ids = append(ids, e.NodeID)
+			if norm, ok := canonicalUUID(e.NodeID); ok {
+				ids = append(ids, norm)
+			}
 		}
-		rows, err := s.db.Query(ctx, `SELECT id::text FROM hysteria_nodes WHERE id::text = ANY($1) AND in_store`, ids)
-		if err != nil {
-			return false, err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
+		if len(ids) > 0 {
+			rows, err := s.db.Query(ctx, `SELECT id::text FROM hysteria_nodes WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL AND in_store`, ids)
+			if err != nil {
 				return false, err
 			}
-			listed[id] = true
-		}
-		rows.Close()
-		if rows.Err() != nil {
-			return false, rows.Err()
+			for rows.Next() {
+				var id string
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return false, err
+				}
+				listed[id] = true
+			}
+			rows.Close()
+			if rows.Err() != nil {
+				return false, rows.Err()
+			}
 		}
 	}
 	for _, e := range excluded {
@@ -542,19 +550,23 @@ type clientOptionsEntry struct {
 
 var clientOptionsCache = struct {
 	sync.Mutex
-	m map[string]clientOptionsEntry
+	m   map[string]clientOptionsEntry
+	gen uint64
 }{m: map[string]clientOptionsEntry{}}
+
+var fetchClientOptionsFn = (*Server).fetchSubscriptionClientOptions
 
 func (s *Server) cachedSubscriptionClientOptions(ctx context.Context, node subscriptionNode) (subscriptionNode, error) {
 	sum := sha256.Sum256([]byte(node.ID + "\x00" + node.AccountUserID + "\x00" + node.Password + "\x00" + node.Host + "\x00" + strconv.Itoa(node.Port)))
 	key := hex.EncodeToString(sum[:])
 	clientOptionsCache.Lock()
+	startGen := clientOptionsCache.gen
 	entry, ok := clientOptionsCache.m[key]
 	clientOptionsCache.Unlock()
 	if ok && time.Since(entry.storedAt) < clientOptionsFresh {
 		return withCachedClientOptions(node, entry.node), nil
 	}
-	fresh, err := s.fetchSubscriptionClientOptions(ctx, node)
+	fresh, err := fetchClientOptionsFn(s, ctx, node)
 	if err != nil {
 		// 节点明确说「没有这个用户」或口令不匹配时主动清除已证伪的缓存，
 		// 防止后续网络抖动把无效旧配置当作兜底继续下发。
@@ -565,11 +577,21 @@ func (s *Server) cachedSubscriptionClientOptions(ctx context.Context, node subsc
 			return fresh, err
 		}
 		if ok && time.Since(entry.storedAt) < clientOptionsStale {
-			return withCachedClientOptions(node, entry.node), nil
+			clientOptionsCache.Lock()
+			stillSameGen := clientOptionsCache.gen == startGen
+			clientOptionsCache.Unlock()
+			if stillSameGen {
+				return withCachedClientOptions(node, entry.node), nil
+			}
 		}
 		return fresh, err
 	}
 	clientOptionsCache.Lock()
+	if clientOptionsCache.gen != startGen {
+		// 拉取期间发生了缓存作废（节点改密、换指纹或协议开关变更），放弃回写旧快照。
+		clientOptionsCache.Unlock()
+		return fresh, nil
+	}
 	now := time.Now()
 	if len(clientOptionsCache.m) > 20000 {
 		// 先清理过期条目，避免整表清空引发缓存雪崩。
@@ -909,6 +931,7 @@ func InvalidateSubscriptionCache() {
 
 	clientOptionsCache.Lock()
 	clientOptionsCache.m = map[string]clientOptionsEntry{}
+	clientOptionsCache.gen++
 	clientOptionsCache.Unlock()
 }
 

@@ -154,6 +154,9 @@ func probeStatusViaAPIWithDial(ctx context.Context, apiURL, apiKey string, timeo
 		return nodeAPIProbe{ErrorKind: "invalid", Detail: err.Error()}
 	}
 	client = pinned
+	// 每次探测均使用独立 Transport（含 TLS 指纹克隆分支），即使协商为 HTTP/2 也必须在退出时强制回收空闲连接，
+	// 防止后台 HTTP/2 读循环协程与底层文件描述符持续泄漏。
+	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -166,9 +169,13 @@ func probeStatusViaAPIWithDial(ctx context.Context, apiURL, apiKey string, timeo
 	// 响应体上限：node/meta 只有几个标量字段，正常不到 1KB。
 	// 设上限是防"对端返回一个巨大的响应把面板内存吃满"——
 	// 那是外部输入，不能假设它守规矩。
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	const maxProbeResponseBytes = 64 * 1024
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxProbeResponseBytes+1))
 	if err != nil {
 		return nodeAPIProbe{ErrorKind: "unreachable", Detail: shortErr(err)}
+	}
+	if len(body) > maxProbeResponseBytes {
+		return nodeAPIProbe{ErrorKind: "invalid", Detail: "节点响应过大（超过 64 KiB），已拒绝解析"}
 	}
 
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {

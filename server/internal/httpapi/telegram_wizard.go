@@ -135,27 +135,27 @@ func (s *Server) telegramWizardOptions(ctx context.Context, w *telegramWizard, f
 	q := ""
 	switch {
 	case f.Name == "server_id" || f.Name == "target_server_id":
-		q = "SELECT id::text,name FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
+		q = "SELECT id::text,COALESCE(name,'') FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
 	case f.Name == "category_id":
-		q = "SELECT id::text,name FROM node_categories ORDER BY name LIMIT 40"
+		q = "SELECT id::text,COALESCE(name,'') FROM node_categories ORDER BY name LIMIT 40"
 	case f.Location == "path" && f.Name == "id":
 		switch {
 		case strings.Contains(w.Pattern, "/api/nodes/"):
-			q = "SELECT id::text,name FROM hysteria_nodes WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
+			q = "SELECT id::text,COALESCE(name,'') FROM hysteria_nodes WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/servers/"):
-			q = "SELECT id::text,name FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
+			q = "SELECT id::text,COALESCE(name,'') FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/subscriptions/"):
-			q = "SELECT id::text,label FROM subscription_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 40"
+			q = "SELECT id::text,COALESCE(label,'') FROM subscription_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/xui/"):
-			q = "SELECT id::text,name FROM xui_panels ORDER BY name LIMIT 40"
+			q = "SELECT id::text,COALESCE(name,'') FROM xui_panels ORDER BY name LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/tasks/"):
-			q = "SELECT id::text,operation_type||' · '||status FROM operation_tasks ORDER BY created_at DESC LIMIT 40"
+			q = "SELECT id::text,COALESCE(operation_type,'')||' · '||COALESCE(status,'') FROM operation_tasks ORDER BY created_at DESC LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/orphans/"):
-			q = "SELECT id::text,node_name||' · '||user_id FROM orphan_node_accounts WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT 40"
+			q = "SELECT id::text,COALESCE(node_name,'')||' · '||COALESCE(user_id,'') FROM orphan_node_accounts WHERE resolved_at IS NULL ORDER BY created_at DESC LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/install-jobs/"):
-			q = "SELECT id,payload->>'step' FROM host_operation_jobs ORDER BY updated_at DESC LIMIT 40"
+			q = "SELECT id,COALESCE(payload->>'step','') FROM host_operation_jobs ORDER BY updated_at DESC LIMIT 40"
 		case strings.Contains(w.Pattern, "/api/portal-update-batches/"):
-			q = "SELECT id::text,status FROM portal_update_batches ORDER BY created_at DESC LIMIT 40"
+			q = "SELECT id::text,COALESCE(status,'') FROM portal_update_batches ORDER BY created_at DESC LIMIT 40"
 		}
 	}
 	if q != "" {
@@ -172,6 +172,10 @@ func (s *Server) telegramWizardOptions(ctx context.Context, w *telegramWizard, f
 				rows.Close()
 				s.logger.Warn("telegram wizard: option scan failed", "field", f.Name, "error", err)
 				return nil
+			}
+			label = strings.TrimSpace(label)
+			if label == "" {
+				label = "未命名 (" + shortID(id) + ")"
 			}
 			out = append(out, telegramChoice{label, id})
 		}

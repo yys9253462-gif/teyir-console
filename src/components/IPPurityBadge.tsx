@@ -57,10 +57,16 @@ function scoreTone(score: number | null): string {
   return 'good'
 }
 
-// triLabel 把 boolean|null 渲染成三段文案。null 一律"未判定"。
+// triLabel 把负面风险标记（boolean|null）渲染成三段文案：null 一律"未判定"，true 为风险红，false 为干净绿。
 function triLabel(value: boolean | null, yes: string, no: string): { text: string; tone: string } {
   if (value === null) return { text: '未判定', tone: 'muted' }
   return value ? { text: yes, tone: 'bad' } : { text: no, tone: 'good' }
+}
+
+// 双 ISP 为正面加分特征：true 呈绿色，false 呈中性灰，null 呈未判定（与 IPPurityPage 保持一致）。
+function dualIspLabel(value: boolean | null): { text: string; tone: string } {
+  if (value === null) return { text: '未判定', tone: 'muted' }
+  return value ? { text: '是', tone: 'good' } : { text: '否', tone: 'muted' }
 }
 
 // 节点列表里每个节点都有一个徽标。原来每个徽标各发一次 GET /api/nodes/{id}/ip-purity，
@@ -235,7 +241,7 @@ export function IPPurityBadge({ nodeId, nodeName, readOnly, notify }: Props) {
           <dl className="ip-purity-grid">
             <div><dt>被检测 IP</dt><dd>{p.ip || '—'}</dd></div>
             <div><dt>连接类型</dt><dd><span className={`tone-${conn.tone}`}>{conn.label}（{p.connection_type}）</span></dd></div>
-            <div><dt>双 ISP</dt><dd className={`tone-${triLabel(p.is_dual_isp, '是', '否').tone}`}>{triLabel(p.is_dual_isp, '是', '否').text}</dd></div>
+            <div><dt>双 ISP</dt><dd className={`tone-${dualIspLabel(p.is_dual_isp).tone}`}>{dualIspLabel(p.is_dual_isp).text}</dd></div>
             <div><dt>纯净度评分</dt><dd className={`tone-${tone}`}>{p.fraud_score === null ? '未判定' : `${p.fraud_score} / 100`}</dd></div>
             <div><dt>代理标记</dt><dd className={`tone-${triLabel(p.is_proxy, '有', '无').tone}`}>{triLabel(p.is_proxy, '有', '无').text}</dd></div>
             <div><dt>VPN 标记</dt><dd className={`tone-${triLabel(p.is_vpn, '有', '无').tone}`}>{triLabel(p.is_vpn, '有', '无').text}</dd></div>

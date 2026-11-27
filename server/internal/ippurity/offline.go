@@ -59,7 +59,11 @@ type OfflineFile struct {
 
 // LoadOfflineFile 从路径加载离线库。
 func LoadOfflineFile(path string) (*OfflineFile, error) {
-	body, err := os.ReadFile(path)
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return nil, fmt.Errorf("未配置离线库路径")
+	}
+	body, err := os.ReadFile(trimmed)
 	if err != nil {
 		return nil, fmt.Errorf("读取离线库失败: %w", err)
 	}
@@ -86,7 +90,7 @@ func LoadOfflineFile(path string) (*OfflineFile, error) {
 		}
 		ones, _ := network.Mask.Size()
 		out.entries = append(out.entries, offlineEntry{
-			network: network,
+			network:   network,
 			prefixLen: ones,
 			verdict: Verdict{
 				ConnectionType: normalizeConnectionType(raw.ConnectionType),
@@ -95,8 +99,8 @@ func LoadOfflineFile(path string) (*OfflineFile, error) {
 			},
 		})
 	}
-	// 按前缀长度降序排：查找时第一个命中的就是最具体的。
-	sort.Slice(out.entries, func(i, j int) bool {
+	// 按前缀长度稳定降序排：查找时第一个命中的就是最具体的，且同前缀长度保持文件内原始顺序。
+	sort.SliceStable(out.entries, func(i, j int) bool {
 		return out.entries[i].prefixLen > out.entries[j].prefixLen
 	})
 	return out, nil

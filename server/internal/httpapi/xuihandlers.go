@@ -308,7 +308,11 @@ func (s *Server) xuiDeletePanel(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusPreconditionRequired, map[string]string{"error": "删除 3X-UI 面板需要 X-Confirm-Dangerous: yes"})
 		return
 	}
-	panelID := r.PathValue("id")
+	panelID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "3X-UI 面板不存在"})
+		return
+	}
 	tag, err := s.db.Exec(r.Context(), `DELETE FROM xui_panels WHERE id=$1::uuid`, panelID)
 	if err != nil {
 		s.databaseError(w, r, err)

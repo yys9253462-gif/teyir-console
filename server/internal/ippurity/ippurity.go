@@ -35,6 +35,7 @@ package ippurity
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -111,7 +112,9 @@ func newSafeClient() *http.Client {
 			return errors.New("IP 纯净度查询不接受重定向")
 		},
 		Transport: &http.Transport{
-			ForceAttemptHTTP2: true,
+			ForceAttemptHTTP2:   true,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, port, err := net.SplitHostPort(addr)
 				if err != nil {
@@ -340,10 +343,13 @@ func (r *Resolver) Lookup(ctx context.Context, rawIP string, forceAPI bool) (Ver
 				verdict.Abuser = sv.Abuser
 			}
 			verdict.ScoreSource = "ipqs"
-			if verdict.Raw == nil {
-				verdict.Raw = map[string]any{}
+			// 写回前克隆 Raw 映射，防止离线库或上游返回共享映射时在并发查询下触发 concurrent map writes 崩溃。
+			rawCopy := make(map[string]any, len(verdict.Raw)+1)
+			for k, v := range verdict.Raw {
+				rawCopy[k] = v
 			}
-			verdict.Raw["ipqs"] = sv.Raw
+			rawCopy["ipqs"] = sv.Raw
+			verdict.Raw = rawCopy
 		} else if err != nil && !errors.Is(err, ErrNoKey) {
 			r.setAPIErr(err)
 			verdict.Partial = "单 IP 评分（IPQS）查询失败：" + err.Error()
@@ -426,12 +432,13 @@ func (r *Resolver) HasOfflineDB() bool { return r != nil && r.db != nil }
 func (r *Resolver) HasAPI() bool       { return r != nil && r.api != nil }
 
 func truncateForError(s string) string {
-	const max = 64
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
+	const maxRunes = 64
+	s = strings.ToValidUTF8(strings.TrimSpace(s), "")
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:maxRunes]) + "…"
 }
 
 // BoolPtr / IntPtr 是构造判定值的便利函数，供离线库与适配器共用。

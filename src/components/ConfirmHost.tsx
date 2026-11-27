@@ -23,12 +23,24 @@ export function ConfirmHost() {
   queueRef.current = queue
   const okRef = useRef<HTMLButtonElement>(null)
   const cancelRef = useRef<HTMLButtonElement>(null)
+  const settledRef = useRef<WeakSet<Pending>>(new WeakSet())
+  const settle = (target: Pending, ok: boolean) => {
+    if (settledRef.current.has(target)) return
+    settledRef.current.add(target)
+    target.resolve(ok)
+    setQueue((q) => q.filter((item) => item !== target))
+  }
   useEffect(() => {
     push = (p) => setQueue((q) => [...q, p])
     return () => {
       push = null
       // 组件卸载时结算全部未决确认，避免调用方 await askConfirm 永久挂起。
-      for (const pending of queueRef.current) pending.resolve(false)
+      for (const pending of queueRef.current) {
+        if (!settledRef.current.has(pending)) {
+          settledRef.current.add(pending)
+          pending.resolve(false)
+        }
+      }
     }
   }, [])
   const current = queue[0]
@@ -46,8 +58,7 @@ export function ConfirmHost() {
         e.preventDefault()
         e.stopImmediatePropagation()
         e.stopPropagation()
-        current.resolve(false)
-        setQueue((q) => q.slice(1))
+        settle(current, false)
       }
     }
     window.addEventListener('keydown', onKey, true)
@@ -56,8 +67,7 @@ export function ConfirmHost() {
   if (!current) return null
 
   function done(ok: boolean) {
-    current.resolve(ok)
-    setQueue((q) => q.slice(1))
+    settle(current, ok)
   }
   const text = current.message.trim()
   const split = text.indexOf('\n\n')

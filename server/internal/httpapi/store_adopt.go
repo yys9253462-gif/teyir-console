@@ -140,9 +140,20 @@ SELECT COALESCE(array_agg(n.name ORDER BY n.name), '{}')
 			return
 		}
 	}
-	// 2026-11-06：商城撤销过的订单号不能再挂到别的订阅上（与 storeCreateOrder 同一判据，见迁移 056）。
+	// 与下单和撤单共用同一事务级订单咨询锁，闭合并发撤单写入黑名单与手工订阅挂单之间的跨表写偏斜。
+	tx, err := s.db.Begin(lockedCtx)
+	if err != nil {
+		s.databaseError(w, r, err)
+		return
+	}
+	defer tx.Rollback(lockedCtx)
+	if _, err := tx.Exec(lockedCtx, `SELECT pg_advisory_xact_lock(hashtext('hy2-ops:store-order:' || $1))`, orderID); err != nil {
+		s.databaseError(w, r, err)
+		return
+	}
+	// 商城撤销过的订单号不能再挂到别的订阅上（与 storeCreateOrder 同一判据）。
 	var revoked bool
-	if err := s.db.QueryRow(lockedCtx, `SELECT EXISTS (SELECT 1 FROM store_revoked_orders WHERE order_id=$1)`, orderID).Scan(&revoked); err != nil {
+	if err := tx.QueryRow(lockedCtx, `SELECT EXISTS (SELECT 1 FROM store_revoked_orders WHERE order_id=$1)`, orderID).Scan(&revoked); err != nil {
 		s.databaseError(w, r, err)
 		return
 	}
@@ -151,7 +162,7 @@ SELECT COALESCE(array_agg(n.name ORDER BY n.name), '{}')
 		return
 	}
 	var id string
-	err = s.db.QueryRow(lockedCtx, `UPDATE subscription_tokens SET order_id=$2
+	err = tx.QueryRow(lockedCtx, `UPDATE subscription_tokens SET order_id=$2
 		WHERE id=$1::uuid AND deleted_at IS NULL AND NOT COALESCE(is_panel_merged, FALSE)
 		  AND (COALESCE(order_id,'')='' OR order_id=$2)
 		  AND NOT EXISTS (SELECT 1 FROM store_revoked_orders WHERE order_id=$2)
@@ -165,6 +176,10 @@ SELECT COALESCE(array_agg(n.name ORDER BY n.name), '{}')
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "该订单号已关联其他订阅"})
 			return
 		}
+		s.databaseError(w, r, err)
+		return
+	}
+	if err := tx.Commit(lockedCtx); err != nil {
 		s.databaseError(w, r, err)
 		return
 	}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"nodeops/server/internal/ippurity"
 	"regexp"
 	"sort"
 	"strings"
@@ -24,7 +23,7 @@ func telegramBottomKeyboard() map[string]any {
 	return map[string]any{"keyboard": rows, "resize_keyboard": true, "is_persistent": true, "one_time_keyboard": false, "input_field_placeholder": "点击下方菜单选择功能"}
 }
 func (s *Server) telegramBottomMenu(ctx context.Context, chat string) error {
-	return telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "sendMessage", map[string]any{"chat_id": chat, "text": "🏠 Teyir 控制台\n菜单在输入框下方。点击按钮选择功能，无需输入接口或 JSON。", "reply_markup": telegramBottomKeyboard()}, nil)
+	return telegramCall(ctx, s.telegramToken(), "sendMessage", map[string]any{"chat_id": chat, "text": "🏠 Teyir 控制台\n菜单在输入框下方。点击按钮选择功能，无需输入接口或 JSON。", "reply_markup": telegramBottomKeyboard()}, nil)
 }
 func (s *Server) telegramFriendlyText(ctx context.Context, chat, sender, text string) bool {
 	switch text {
@@ -68,7 +67,7 @@ func (s *Server) telegramFriendlyText(ctx context.Context, chat, sender, text st
 var telegramUUID = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 func (s *Server) telegramPick(ctx context.Context, chat, kind string) {
-	queries := map[string]string{"nodes": "SELECT id::text,name FROM hysteria_nodes WHERE deleted_at IS NULL ORDER BY name LIMIT 40", "servers": "SELECT id::text,name FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40", "subs": "SELECT id::text,label FROM subscription_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 40"}
+	queries := map[string]string{"nodes": "SELECT id::text,COALESCE(name,'') FROM hysteria_nodes WHERE deleted_at IS NULL ORDER BY name LIMIT 40", "servers": "SELECT id::text,COALESCE(name,'') FROM servers WHERE deleted_at IS NULL ORDER BY name LIMIT 40", "subs": "SELECT id::text,COALESCE(label,'') FROM subscription_tokens WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT 40"}
 	q, ok := queries[kind]
 	if !ok {
 		return
@@ -191,7 +190,7 @@ func (s *Server) telegramFriendlyCallback(ctx context.Context, chat, sender, dat
 	return true
 }
 func (s *Server) telegramResourceName(ctx context.Context, kind, id string) string {
-	q := map[string]string{"nodes": "SELECT name FROM hysteria_nodes WHERE id=$1::uuid AND deleted_at IS NULL", "servers": "SELECT name FROM servers WHERE id=$1::uuid AND deleted_at IS NULL", "subs": "SELECT label FROM subscription_tokens WHERE id=$1::uuid"}[kind]
+	q := map[string]string{"nodes": "SELECT COALESCE(name,'') FROM hysteria_nodes WHERE id=$1::uuid AND deleted_at IS NULL", "servers": "SELECT COALESCE(name,'') FROM servers WHERE id=$1::uuid AND deleted_at IS NULL", "subs": "SELECT COALESCE(label,'') FROM subscription_tokens WHERE id=$1::uuid AND deleted_at IS NULL"}[kind]
 	name := "当前对象"
 	if q != "" && s.db != nil {
 		// 2026-11-06：读不到名字（数据库错误、对象已删）时给出 ID 前缀，不能只写一句「当前对象」——
@@ -374,7 +373,7 @@ func (s *Server) telegramActionText(ctx context.Context, a telegramAction) strin
 
 func telegramRemoveKeyboard() map[string]any { return map[string]any{"remove_keyboard": true} }
 func (s *Server) telegramHideMenu(ctx context.Context, chat string) error {
-	return telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "sendMessage", map[string]any{"chat_id": chat, "text": "菜单已收起。发送 /menu 可重新展开。", "reply_markup": telegramRemoveKeyboard()}, nil)
+	return telegramCall(ctx, s.telegramToken(), "sendMessage", map[string]any{"chat_id": chat, "text": "菜单已收起。发送 /menu 可重新展开。", "reply_markup": telegramRemoveKeyboard()}, nil)
 }
 
 // telegramQuickPaths 是菜单按钮「ux:q:<key>」对应的只读接口。

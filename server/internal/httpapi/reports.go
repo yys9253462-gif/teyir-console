@@ -94,7 +94,11 @@ func (s *Server) setSubscriptionRevenue(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "币种只支持 USD / CNY / EUR / HKD / JPY"})
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "订阅不存在"})
+		return
+	}
 	tag, err := s.db.Exec(r.Context(), `UPDATE subscription_tokens SET revenue_monthly=$2, revenue_currency=$3 WHERE id=$1::uuid AND deleted_at IS NULL`, id, in.Monthly, in.Currency)
 	if err != nil {
 		s.databaseError(w, r, err)

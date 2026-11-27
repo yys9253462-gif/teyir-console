@@ -137,6 +137,10 @@ ORDER BY c.sort_order, c.name`)
 
 // GET /api/categories
 func (s *Server) categoriesList(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceReadLimit(w, claims.Subject) {
+		return
+	}
 	cats, err := s.listCategories(r.Context())
 	if err != nil {
 		s.databaseError(w, r, err)
@@ -378,7 +382,11 @@ func (s *Server) nodeSetCategories(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := r.PathValue("id")
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
+	}
 	var input struct {
 		CategoryIDs []string `json:"category_ids"`
 	}

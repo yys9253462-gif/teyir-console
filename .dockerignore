@@ -20,6 +20,8 @@ coverage.out
 # 私有环境与数据
 .env
 .env.*
+install.conf
+install.conf.*
 geo-data
 releases
 
@@ -29,6 +31,7 @@ tests
 docs
 deploy
 deploy.sh
+install.sh
 integrations
 tools
 *.md

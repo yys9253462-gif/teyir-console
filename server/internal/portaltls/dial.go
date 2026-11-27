@@ -35,12 +35,19 @@ func OrderDialIPs(ips []net.IPAddr) []net.IP {
 	return append(v4, v6...)
 }
 
+// maxDialCandidates 限制单次拨号最多尝试的去重候选地址数，防止异常海量 DNS 解析记录线性放大总超时。
+const maxDialCandidates = 8
+
 // DialCheckedIPs 按 IPv4 优先顺序依次拨号已经全部通过安全校验的地址列表。
+// 当调用方指定了明确地址族（如 tcp4/tcp6）时仅尝试匹配地址族，避免用异族地址拨号覆盖真实连接错误。
 // 任一地址建连失败且上下文未结束时自动回退到下一个已校验地址，全部失败则返回最后一次错误。
 func DialCheckedIPs(ctx context.Context, dialer *net.Dialer, network, port string, ips []net.IPAddr) (net.Conn, error) {
-	ordered := OrderDialIPs(ips)
+	ordered := filterByNetwork(OrderDialIPs(ips), network)
 	if len(ordered) == 0 {
 		return nil, errors.New("没有可拨号的已校验地址")
+	}
+	if len(ordered) > maxDialCandidates {
+		ordered = ordered[:maxDialCandidates]
 	}
 	if dialer == nil {
 		dialer = &net.Dialer{}
@@ -60,4 +67,20 @@ func DialCheckedIPs(ctx context.Context, dialer *net.Dialer, network, port strin
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+func filterByNetwork(ordered []net.IP, network string) []net.IP {
+	wantV4 := network == "tcp4" || network == "udp4" || network == "ip4"
+	wantV6 := network == "tcp6" || network == "udp6" || network == "ip6"
+	if !wantV4 && !wantV6 {
+		return ordered
+	}
+	out := make([]net.IP, 0, len(ordered))
+	for _, ip := range ordered {
+		isV4 := ip.To4() != nil
+		if (wantV4 && isV4) || (wantV6 && !isV4) {
+			out = append(out, ip)
+		}
+	}
+	return out
 }

@@ -31,17 +31,32 @@ func NewSigner(secret string, ttl time.Duration) *Signer {
 }
 
 // TTL reports how long issued sessions stay valid.
-func (s *Signer) TTL() time.Duration { return s.ttl }
+func (s *Signer) TTL() time.Duration {
+	if s == nil {
+		return 0
+	}
+	return s.ttl
+}
+
+func (s *Signer) currentTime() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
 
 func (s *Signer) Issue(subject, email, role string) (string, error) {
 	return s.IssueVersion(subject, email, role, 0)
 }
 
 func (s *Signer) IssueVersion(subject, email, role string, version int64) (string, error) {
-	if len(s.secret) == 0 {
+	if s == nil || len(s.secret) == 0 {
 		return "", errors.New("auth: missing signing secret")
 	}
-	now := s.now()
+	if s.ttl <= 0 {
+		return "", errors.New("auth: invalid signing ttl")
+	}
+	now := s.currentTime()
 	claims := Claims{
 		Version: version,
 		Subject: subject,
@@ -67,7 +82,7 @@ func (s *Signer) IssueVersion(subject, email, role string, version int64) (strin
 }
 
 func (s *Signer) Verify(token string) (Claims, error) {
-	if len(s.secret) == 0 {
+	if s == nil || len(s.secret) == 0 {
 		return Claims{}, errors.New("auth: missing signing secret")
 	}
 	parts := strings.Split(token, ".")
@@ -103,7 +118,7 @@ func (s *Signer) Verify(token string) (Claims, error) {
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return Claims{}, fmt.Errorf("auth: parse payload: %w", err)
 	}
-	if s.now().Unix() >= claims.Expires {
+	if s.currentTime().Unix() >= claims.Expires {
 		return Claims{}, errors.New("auth: token expired")
 	}
 	return claims, nil

@@ -632,11 +632,12 @@ function XuiPanelDrawer({ panel, notify, onClose, onRequestDelete, onChanged }: 
           </div>
         ) : (
           <div style={{ display: 'grid', gap: 8 }}>
-            {filtered.map((client) => {
+            {filtered.map((client, idx) => {
               const ratio = usageRatio(client.up + client.down, client.total)
               const expiry = expiryRemaining(client.expiry_time)
+              // 非管理员的 client_id 由后端脱敏为空串，必须联合邮箱与序号构键，防止同入站客户端 React 键冲突。
               return (
-                <div key={`${client.inbound_id}-${client.client_id}`} className={`xui-client-card ${client.online ? 'xui-client-online' : ''}`}>
+                <div key={`${client.inbound_id}-${client.client_id || client.email}-${idx}`} className={`xui-client-card ${client.online ? 'xui-client-online' : ''}`}>
                   <div className="xui-client-head">
                     {client.online ? <Wifi size={15} /> : <WifiOff size={15} />}
                     <strong title={client.email}>{client.email}</strong>

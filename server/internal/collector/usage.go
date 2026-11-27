@@ -477,6 +477,11 @@ func fetchPortalUsers(ctx context.Context, apiURL, apiKey string) ([]portalUserU
 	if err != nil {
 		return nil, err
 	}
+	// 当命中 TLS 证书指纹时 portaltls.Client 会克隆一次性 Transport；先注册回收空闲连接，
+	// 利用 defer 后进先出顺序在 resp.Body.Close() 之后彻底关闭可能残留的 HTTP/2 读循环与连接。
+	if client != usageClient {
+		defer client.CloseIdleConnections()
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, constErr(shortErr(err))
@@ -525,38 +530,47 @@ func fetchPortalUsers(ctx context.Context, apiURL, apiKey string) ([]portalUserU
 	return parsed.Users, nil
 }
 
-// applyEnvelopeSources 用户自己没带（或带的是空对象）measurement_sources 时，填入信封里的节点级那份。
+// applyEnvelopeSources 用户自己没带（或带的是空/非法对象）measurement_sources 时，填入信封里的节点级合法非空对象。
 func applyEnvelopeSources(users []portalUserUsage, sources json.RawMessage) {
 	trimmed := strings.TrimSpace(string(sources))
-	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" || !isValidJSONObject(trimmed) {
 		return
 	}
 	for i := range users {
 		own := strings.TrimSpace(string(users[i].MeasurementSources))
-		if own == "" || own == "{}" || own == "null" {
+		if own == "" || own == "{}" || own == "null" || !isValidJSONObject(own) {
 			users[i].MeasurementSources = sources
 		}
 	}
 }
 
-// applyEnvelopeGaps 用户自己没带（或为 null）measurement_gaps 时，填入信封里的节点级那份。
+// applyEnvelopeGaps 用户自己没带（或为 null/非法数组）measurement_gaps 时，填入信封里的节点级合法数组。
 func applyEnvelopeGaps(users []portalUserUsage, gaps json.RawMessage) {
 	trimmed := strings.TrimSpace(string(gaps))
-	if trimmed == "" || trimmed == "null" {
+	if trimmed == "" || trimmed == "null" || !isValidJSONArray(trimmed) {
 		return
 	}
 	for i := range users {
 		own := strings.TrimSpace(string(users[i].MeasurementGaps))
-		if own == "" || own == "null" {
+		if own == "" || own == "null" || !isValidJSONArray(own) {
 			users[i].MeasurementGaps = gaps
 		}
 	}
 }
 
-// normalizeJSONObject 与 normalizeJSONArray 将空字节串或 JSON null 兜底为 {} / []，避免 jsonb 列落入 null。
+func isValidJSONObject(trimmed string) bool {
+	return len(trimmed) >= 2 && trimmed[0] == '{' && trimmed[len(trimmed)-1] == '}' && json.Valid([]byte(trimmed))
+}
+
+func isValidJSONArray(trimmed string) bool {
+	return len(trimmed) >= 2 && trimmed[0] == '[' && trimmed[len(trimmed)-1] == ']' && json.Valid([]byte(trimmed))
+}
+
+// normalizeJSONObject 与 normalizeJSONArray 确保落入 jsonb 列的始终是合法 JSON 对象 / 数组，
+// 防止 null、标量或类型错配写入数据库后引发下游 jsonb_each / jsonb_array_elements 报错。
 func normalizeJSONObject(raw json.RawMessage) json.RawMessage {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
+	if !isValidJSONObject(trimmed) {
 		return json.RawMessage(`{}`)
 	}
 	return raw
@@ -564,7 +578,7 @@ func normalizeJSONObject(raw json.RawMessage) json.RawMessage {
 
 func normalizeJSONArray(raw json.RawMessage) json.RawMessage {
 	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
+	if !isValidJSONArray(trimmed) {
 		return json.RawMessage(`[]`)
 	}
 	return raw

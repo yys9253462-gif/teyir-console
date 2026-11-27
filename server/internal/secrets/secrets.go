@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // Box encrypts node credentials at rest with AES-256-GCM.
@@ -18,10 +19,11 @@ type Box struct {
 }
 
 func NewBox(rawKey string) (*Box, error) {
-	key, err := base64.StdEncoding.DecodeString(rawKey)
+	key, err := base64.StdEncoding.DecodeString(strings.TrimSpace(rawKey))
 	if err != nil {
 		return nil, fmt.Errorf("CREDENTIAL_KEY must be base64: %w", err)
 	}
+	defer clear(key)
 	if len(key) != 32 {
 		return nil, errors.New("CREDENTIAL_KEY must decode to 32 bytes")
 	}
@@ -37,6 +39,9 @@ func NewBox(rawKey string) (*Box, error) {
 }
 
 func (b *Box) Seal(plaintext []byte) ([]byte, error) {
+	if b == nil || b.aead == nil {
+		return nil, errors.New("credential box is not initialized")
+	}
 	nonce := make([]byte, b.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return nil, err
@@ -45,6 +50,9 @@ func (b *Box) Seal(plaintext []byte) ([]byte, error) {
 }
 
 func (b *Box) Open(ciphertext []byte) ([]byte, error) {
+	if b == nil || b.aead == nil {
+		return nil, errors.New("credential box is not initialized")
+	}
 	if len(ciphertext) < b.aead.NonceSize()+b.aead.Overhead() {
 		return nil, errors.New("ciphertext too short")
 	}

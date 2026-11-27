@@ -228,3 +228,53 @@ func TestCollectorConcurrentRunAndWaitNoRace(t *testing.T) {
 	}
 }
 
+// 验证外层主机采集阶段预算耗尽（parent=DeadlineExceeded）时，collectServer 绝不改写数据库标离线，
+// 也不启动 12 秒降级探测挤占后半段用量预算（此处 db 为 nil，若触库会立即触发崩溃）。
+func TestCollectServerSkipsStatusMutationWhenParentStageDeadlineExceeded(t *testing.T) {
+	c := NewCollector(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, 30, nil)
+	expiredStage, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+
+	// 给一个带 SSH 凭据的目标，在已超时阶段上下文中拨号必得 DeadlineExceeded。
+	start := time.Now()
+	c.collectServer(expiredStage, target{
+		id:      "host-stage-expired",
+		name:    "stage-expired-test",
+		host:    "127.0.0.1",
+		port:    1,
+		user:    "root",
+		hasCred: true,
+	})
+	if time.Since(start) > 2*time.Second {
+		t.Fatalf("阶段已超时时 collectServer 应立即跳过，实际耗时 %v", time.Since(start))
+	}
+}
+
+// 验证 normalizeJSONObject / normalizeJSONArray 拦截错配类型（对象列遇数组、数组列遇对象、标量与非法 JSON），
+// 同时 applyEnvelopeSources / applyEnvelopeGaps 拒绝把错配类型的信封回填给用户。
+func TestNormalizeJSONRejectsMismatchedTypes(t *testing.T) {
+	for _, badObj := range []string{"", "null", "[]", `"str"`, "123", "{broken"} {
+		if got := string(normalizeJSONObject(json.RawMessage(badObj))); got != `{}` {
+			t.Errorf("normalizeJSONObject(%q) = %q，期望 {}", badObj, got)
+		}
+	}
+	if got := string(normalizeJSONObject(json.RawMessage(`{"hysteria":true}`))); got != `{"hysteria":true}` {
+		t.Errorf("合法对象不应被修改，实际 %q", got)
+	}
+	for _, badArr := range []string{"", "null", "{}", `"str"`, "123", "[broken"} {
+		if got := string(normalizeJSONArray(json.RawMessage(badArr))); got != `[]` {
+			t.Errorf("normalizeJSONArray(%q) = %q，期望 []", badArr, got)
+		}
+	}
+	if got := string(normalizeJSONArray(json.RawMessage(`[{"gap":"x"}]`))); got != `[{"gap":"x"}]` {
+		t.Errorf("合法数组不应被修改，实际 %q", got)
+	}
+
+	users := []portalUserUsage{{UserID: "u1"}}
+	applyEnvelopeSources(users, json.RawMessage(`["not-an-object"]`))
+	applyEnvelopeGaps(users, json.RawMessage(`{"not":"an-array"}`))
+	if len(users[0].MeasurementSources) != 0 || len(users[0].MeasurementGaps) != 0 {
+		t.Fatalf("错配类型的信封不得回填给用户: sources=%s gaps=%s", users[0].MeasurementSources, users[0].MeasurementGaps)
+	}
+}
+

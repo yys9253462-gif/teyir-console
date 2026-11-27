@@ -34,7 +34,7 @@ func TestSSHDialFailureReasonIsTyped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(src), "status_error=$2, updated_at=now() WHERE id=$1`, t.id, sshDialFailureReason(err))") {
+	if !strings.Contains(string(src), "status_error=$2, updated_at=now() WHERE id=$1 AND deleted_at IS NULL`, t.id, sshDialFailureReason(err))") {
 		t.Fatal("dial failure branch must persist the reason into servers.status_error")
 	}
 }

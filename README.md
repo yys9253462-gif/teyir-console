@@ -63,15 +63,15 @@ curl -fsSL https://raw.githubusercontent.com/yys9253462-gif/teyir-console/main/i
 curl -fsSL https://raw.githubusercontent.com/yys9253462-gif/teyir-console/main/install.sh -o ~/teyir-install.sh && sudo bash ~/teyir-install.sh
 ```
 
-> 若服务器访问 `raw.githubusercontent.com` 不畅，可改用备用源（`cdn.jsdelivr.net`）：
+> 若服务器访问 `raw.githubusercontent.com` 不畅，可改用备用源（`cdn.jsdelivr.net`，普通用户把 `bash` 改为 `sudo bash`）：
 > ```bash
 > curl -fsSL https://cdn.jsdelivr.net/gh/yys9253462-gif/teyir-console@main/install.sh -o ~/teyir-install.sh && bash ~/teyir-install.sh
 > ```
 > 安装完成后脚本会自动备份到安装目录并注册全局快捷命令 `teyir`（普通用户用 `sudo teyir`），日后随时输入 `teyir` 即可再次打开交互管理菜单。
 
 交互菜单内置以下功能：
-1. **一键安装 / 重新配置部署**：仅需回答 2–3 个问题（访问方式与域名、初始管理员账号、可选高级项），其余密钥与端口自动安全生成；重配时自动保留既有 `CREDENTIAL_KEY` 与 `POSTGRES_PASSWORD`。
-2. **一键升级更新**：自动备份配置与数据库 → 拉取最新源码 → 重建并执行 `migrate` 迁移 → 重建 `api` / `web` → 容器内部健康验收。
+1. **一键安装 / 重新配置部署**：仅需回答 2–3 个问题（访问方式与域名、初始管理员账号、可选高级项），其余密钥与端口自动安全生成；重配时自动保留既有 `CREDENTIAL_KEY`、`POSTGRES_PASSWORD` 与你在 `.env` 中手工追加的自定义环境变量，并自动避让已有监听端口、Docker 端口范围与 NAT 端口重定向区间。
+2. **一键升级更新**：自动备份配置与数据库 → 拉取最新源码（同时支持 Git 仓库与压缩包安装形态平滑升级）→ 重建并执行 `migrate` 迁移 → 重建 `api` / `web` → 容器内部健康验收。
 3. **运行状态总览**：查看容器状态、容器内部健康探针、公网 HTTPS 连通性与证书到期时间（只读操作不强制 root）。
 4. **修改配置子菜单**：单独调整域名/访问方式、端口、默认订阅名、周期采集开关或外部联动地址，改共享 Caddyfile 前自动备份、校验、热重载，失败自动回滚。
 5. **服务运维子菜单**：启停、重启、查看 `api`/`web`/`db` 日志、立即备份、手动触发数据库迁移。

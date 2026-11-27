@@ -180,7 +180,8 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
     })
   }
 
-  function trafficDraftOK(): boolean {
+  function trafficDraftOK(requireCheck = true): boolean {
+    if (!requireCheck) return true
     if (!draft.trafficUrl && !draft.trafficFile) return true
     if (!draft.trafficUrl || !draft.trafficFile) {
       notify('速率采集接口与密钥文件路径需同时填写，或同时留空')
@@ -318,7 +319,8 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
       return
     }
     const endpointChanged = draft.host.trim() !== editing.host || port !== editing.ssh_port || draft.ssh_user.trim() !== editing.ssh_user
-    if (!trafficDraftOK()) return
+    const trafficChanged = draft.trafficUrl !== (editing.traffic_api_url || '') || draft.trafficFile !== (editing.traffic_secret_file || '')
+    if (!trafficDraftOK(trafficChanged)) return
     if (draft.auth !== 'none' && draft.secret.trim().length < 6) {
       notify(draft.auth === 'ssh_key' ? '请粘贴新的 SSH 私钥，或把认证方式改回「不更换凭据」' : 'SSH 密码至少 6 个字符')
       return
@@ -328,10 +330,10 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
       await api.updateServer(editing.id, {
         name: draft.name.trim(), region: draft.region.trim(), provider: draft.provider.trim(),
         tags: draft.tags.split(',').map((tag) => tag.trim()).filter(Boolean),
-        // 只在真的改了时才发 SSH 端点字段：后端把它们视为改端点（清空主机指纹、仅管理员可改），
-        // 原样带上会让 operator 改个名字也被拒，还会无谓地重置已登记的指纹。
+        // 只在真的改了时才发 SSH 端点与流量采集字段：后端将这五项全部归为管理员专属（manage.go touchesEndpoint），
+        // 原样回传会导致运维账号修改名称/地区/标签时触发 403，且会无谓清空已锁定的主机指纹。
         ...(endpointChanged ? { host: draft.host.trim(), ssh_port: port, ssh_user: draft.ssh_user.trim() } : {}),
-        traffic_api_url: draft.trafficUrl, traffic_secret_file: draft.trafficFile,
+        ...(trafficChanged ? { traffic_api_url: draft.trafficUrl, traffic_secret_file: draft.trafficFile } : {}),
       })
       if (draft.auth !== 'none') {
         try {
@@ -396,8 +398,8 @@ export function ServersPage({ servers, nodes = [], createSignal, onOpen, onChang
       </div>
       <label className="form-field"><span>标签（逗号分隔）</span><input value={draft.tags} onChange={(event) => setDraft({ ...draft, tags: event.target.value })} placeholder="hy2, edge" /></label>
       <div className="form-row">
-        <label className="form-field"><span>速率采集接口（可留空）</span><input value={draft.trafficUrl} onChange={(event) => setDraft({ ...draft, trafficUrl: event.target.value.trim() })} placeholder="http://127.0.0.1:29862" spellCheck={false} /></label>
-        <label className="form-field"><span>密钥文件路径（目标机）</span><input value={draft.trafficFile} onChange={(event) => setDraft({ ...draft, trafficFile: event.target.value.trim() })} placeholder="/etc/hysteria/traffic_stats_secret" spellCheck={false} /></label>
+        <label className="form-field"><span>速率采集接口（可留空）{endpointLocked ? '（仅管理员可修改）' : ''}</span><input value={draft.trafficUrl} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, trafficUrl: event.target.value.trim() })} placeholder="http://127.0.0.1:29862" spellCheck={false} /></label>
+        <label className="form-field"><span>密钥文件路径（目标机）{endpointLocked ? '（仅管理员可修改）' : ''}</span><input value={draft.trafficFile} disabled={endpointLocked} onChange={(event) => setDraft({ ...draft, trafficFile: event.target.value.trim() })} placeholder="/etc/hysteria/traffic_stats_secret" spellCheck={false} /></label>
       </div>
       <p className="form-note">填了这两项，采集器每个周期会在目标机本地读取 hysteria 自带的 trafficStats 接口（<code>?clear=true</code> 取走即清零），把这一周期的字节数按上/下行分别入库，总览的「流量趋势」就会出现真实曲线。地址仅允许回环 http，密钥不入库、只记文件路径。</p>
       <label className="form-field"><span>{editing ? '更换 SSH 凭据（可选）' : 'SSH 认证方式'}{endpointLocked ? '（仅管理员可更换）' : ''}</span>

@@ -2,9 +2,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type Config struct {
@@ -57,7 +59,7 @@ type Config struct {
 
 func Load() (Config, error) {
 	port := 8080
-	if raw := os.Getenv("PORT"); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("PORT")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 1 || parsed > 65535 {
 			return Config{}, fmt.Errorf("PORT must be an integer between 1 and 65535")
@@ -65,7 +67,7 @@ func Load() (Config, error) {
 		port = parsed
 	}
 
-	databaseURL := os.Getenv("DATABASE_URL")
+	databaseURL := strings.TrimSpace(os.Getenv("DATABASE_URL"))
 	if databaseURL == "" {
 		return Config{}, fmt.Errorf("DATABASE_URL is required")
 	}
@@ -79,7 +81,7 @@ func Load() (Config, error) {
 	}
 
 	collectorSeconds := 30
-	if raw := os.Getenv("COLLECTOR_INTERVAL_SECONDS"); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("COLLECTOR_INTERVAL_SECONDS")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err == nil && parsed > 0 && parsed <= 3600 {
 			collectorSeconds = parsed
@@ -87,7 +89,7 @@ func Load() (Config, error) {
 	}
 
 	jwtTTL := 720
-	if raw := os.Getenv("JWT_TTL_MINUTES"); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("JWT_TTL_MINUTES")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err == nil && parsed > 0 && parsed <= 24*60 {
 			jwtTTL = parsed
@@ -95,22 +97,22 @@ func Load() (Config, error) {
 	}
 
 	secret := os.Getenv("JWT_SECRET")
-	if len(secret) < 32 {
-		return Config{}, fmt.Errorf("JWT_SECRET must be at least 32 characters")
+	if len(secret) < 32 || strings.TrimSpace(secret) == "" {
+		return Config{}, fmt.Errorf("JWT_SECRET must be at least 32 non-whitespace characters")
 	}
-	adminEmail := os.Getenv("SEED_ADMIN_EMAIL")
+	adminEmail := strings.TrimSpace(os.Getenv("SEED_ADMIN_EMAIL"))
 	adminPassword := os.Getenv("SEED_ADMIN_PASSWORD")
-	if adminEmail == "" || len(adminPassword) < 12 {
+	if adminEmail == "" || len(adminPassword) < 12 || strings.TrimSpace(adminPassword) == "" {
 		return Config{}, fmt.Errorf("SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD (at least 12 characters) are required")
 	}
 
-	credentialKey := os.Getenv("CREDENTIAL_KEY")
+	credentialKey := strings.TrimSpace(os.Getenv("CREDENTIAL_KEY"))
 	if credentialKey == "" {
 		return Config{}, fmt.Errorf("CREDENTIAL_KEY is required (base64 of 32 random bytes)")
 	}
 
 	executorSeconds := 20
-	if raw := os.Getenv("EXECUTOR_INTERVAL_SECONDS"); raw != "" {
+	if raw := strings.TrimSpace(os.Getenv("EXECUTOR_INTERVAL_SECONDS")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err == nil && parsed > 0 && parsed <= 3600 {
 			executorSeconds = parsed
@@ -132,9 +134,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	// 启动配置阶段即校验可信代理网段，兼容逗号与任意空白分隔，避免非法网段穿过配置加载后在路由初始化时崩溃。
+	trustedProxyCIDRs := strings.FieldsFunc(os.Getenv("TRUSTED_PROXY_CIDRS"), func(r rune) bool {
+		return r == ',' || unicode.IsSpace(r)
+	})
+	for _, entry := range trustedProxyCIDRs {
+		if _, _, err := net.ParseCIDR(entry); err != nil {
+			return Config{}, fmt.Errorf("TRUSTED_PROXY_CIDRS contains invalid CIDR %q: %w", entry, err)
+		}
+	}
+
 	return Config{
 		ViewerRestrictSubscriptions: viewerRestrict,
-		TrustedProxyCIDRs:           strings.FieldsFunc(os.Getenv("TRUSTED_PROXY_CIDRS"), func(r rune) bool { return r == ',' || r == ' ' }),
+		TrustedProxyCIDRs:           trustedProxyCIDRs,
 		Port:                        port,
 		DatabaseURL:                 databaseURL,
 		AllowedOrigins:              origins,

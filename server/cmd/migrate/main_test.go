@@ -71,6 +71,34 @@ func TestBaselineUsesAtomicTransactionAndDeferredUnlock(t *testing.T) {
 	if !strings.Contains(src, "recordBaselineVersions(ctx, pool, files)") {
 		t.Fatal("旧库基线录入必须使用单事务函数 recordBaselineVersions")
 	}
+	if !strings.Contains(src, "runMain(logger)") {
+		t.Fatal("main.go 必须将主流程抽离至 runMain 返回错误，确保失败路径退出前执行 defer unlock()")
+	}
+}
+
+// 验证数值等价版本匹配（如 053 与 53）、UTF-8 BOM 剥离，避免历史台账等价版本被重放或 BOM 导致语法错。
+func TestSelectPendingMigrationsCanonicalVersionAndBOMStrip(t *testing.T) {
+	files := []migrationFile{
+		{version: "001", name: "001_init.sql"},
+		{version: "53", name: "53_index.sql"},
+		{version: "060", name: "060_cursors.sql"},
+	}
+	applied := map[string]struct{}{
+		"000_baseline": {},
+		"1":            {},
+		"053":          {},
+	}
+	pending := selectPendingMigrations(files, applied)
+	if len(pending) != 1 || pending[0].version != "060" {
+		t.Fatalf("前导零等价版本应识别为已应用，仅剩 060，实际: %+v", pending)
+	}
+	withBOM := append([]byte{0xef, 0xbb, 0xbf}, []byte("SELECT 1;")...)
+	if got := string(stripUTF8BOM(withBOM)); got != "SELECT 1;" {
+		t.Fatalf("stripUTF8BOM 未剥离 UTF-8 BOM，实际: %q", got)
+	}
+	if got := string(stripUTF8BOM([]byte("SELECT 2;"))); got != "SELECT 2;" {
+		t.Fatalf("无 BOM 内容不应被修改，实际: %q", got)
+	}
 }
 
 // 2026-11-04：迁移器整体持 advisory 锁，第二个进程要等第一个跑完。

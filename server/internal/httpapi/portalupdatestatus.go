@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -33,10 +34,16 @@ type portalUpdateStatus struct {
 	CheckedAt time.Time          `json:"checked_at"`
 }
 
+type portalUpdateStatusFlight struct {
+	done chan struct{}
+	res  portalUpdateStatus
+}
+
 var portalUpdateStatusCache struct {
 	sync.Mutex
 	result   *portalUpdateStatus
-	inflight chan struct{}
+	gen      uint64
+	inflight *portalUpdateStatusFlight
 }
 
 // GET /api/portal-update-status[?refresh=1]
@@ -58,33 +65,52 @@ func (s *Server) cachedPortalUpdateStatus(ctx context.Context, force bool) porta
 		c.Unlock()
 		return res
 	}
-	if wait := c.inflight; wait != nil {
+	if flight := c.inflight; flight != nil {
 		c.Unlock()
 		select {
-		case <-wait:
+		case <-flight.done:
+			return flight.res
 		case <-ctx.Done():
-		}
-		c.Lock()
-		defer c.Unlock()
-		if c.result == nil {
 			return portalUpdateStatus{Error: "检查尚未完成，请稍后重试", Nodes: []portalUpdateNode{}}
 		}
-		return *c.result
 	}
-	done := make(chan struct{})
-	c.inflight = done
+	flight := &portalUpdateStatusFlight{done: make(chan struct{})}
+	startGen := c.gen
+	c.inflight = flight
 	c.Unlock()
 
-	// 独立超时：发起者关掉弹窗不应让共享这次检查的其它请求失败。
-	fetchCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	res := s.checkPortalUpdateStatus(fetchCtx)
-	cancel()
+	// 在独立协程中执行并配合异常恢复，确保即使发生异常也必清空 inflight 并唤醒所有等待者；
+	// 写回缓存前比对版本号，防止批量更新完成后在途旧检查覆盖最新状态。
+	go func() {
+		res := portalUpdateStatus{Error: "检查门户版本状态时发生内部异常", Nodes: []portalUpdateNode{}, CheckedAt: time.Now()}
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("portal update status panic", "panic", rec, "stack", string(debug.Stack()))
+			}
+			flight.res = res
+			c.Lock()
+			if c.gen == startGen {
+				copied := res
+				c.result = &copied
+			}
+			if c.inflight == flight {
+				c.inflight = nil
+			}
+			c.Unlock()
+			close(flight.done)
+		}()
+		// 独立超时：发起者关掉弹窗不应让共享这次检查的其它请求失败。
+		fetchCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		res = s.checkPortalUpdateStatus(fetchCtx)
+		cancel()
+	}()
 
-	c.Lock()
-	c.result, c.inflight = &res, nil
-	c.Unlock()
-	close(done)
-	return res
+	select {
+	case <-flight.done:
+		return flight.res
+	case <-ctx.Done():
+		return portalUpdateStatus{Error: "检查尚未完成，请稍后重试", Nodes: []portalUpdateNode{}}
+	}
 }
 
 func (s *Server) checkPortalUpdateStatus(ctx context.Context) portalUpdateStatus {
@@ -107,7 +133,10 @@ func (s *Server) checkPortalUpdateStatus(ctx context.Context) portalUpdateStatus
 		n := portalUpdateNode{OutdatedFiles: []string{}}
 		if err := rows.Scan(&n.NodeID, &n.Name); err != nil {
 			rows.Close()
-			res.Error = "node list scan failed: " + err.Error()
+			if s.logger != nil {
+				s.logger.Warn("portal update status: node list scan failed:", "error", err)
+			}
+			res.Error = "读取节点列表失败，请查看服务端日志"
 			res.CheckedAt = time.Now()
 			return res
 		}
@@ -115,7 +144,10 @@ func (s *Server) checkPortalUpdateStatus(ctx context.Context) portalUpdateStatus
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		res.Error = "node list read failed: " + err.Error()
+		if s.logger != nil {
+			s.logger.Warn("portal update status: node list read failed:", "error", err)
+		}
+		res.Error = "读取节点列表失败，请查看服务端日志"
 		res.CheckedAt = time.Now()
 		return res
 	}
@@ -189,9 +221,10 @@ func comparePortalFiles(bundle *struct {
 	return outdated, &ok
 }
 
-// invalidatePortalUpdateStatus 在批量更新结束后调用，让弹窗下一次读到真实的新状态。
+// invalidatePortalUpdateStatus 在批量更新结束后调用，递增版本号并清空缓存，防止在途旧检查回写过期结果。
 func invalidatePortalUpdateStatus() {
 	portalUpdateStatusCache.Lock()
 	portalUpdateStatusCache.result = nil
+	portalUpdateStatusCache.gen++
 	portalUpdateStatusCache.Unlock()
 }

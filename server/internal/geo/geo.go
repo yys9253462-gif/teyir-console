@@ -34,12 +34,14 @@ package geo
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"nodeops/server/internal/portaltls"
 	"strings"
 	"sync"
@@ -126,7 +128,9 @@ func newSafeClient() *http.Client {
 			return errors.New("geo 查询不接受重定向")
 		},
 		Transport: &http.Transport{
-			ForceAttemptHTTP2: true,
+			ForceAttemptHTTP2:   true,
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12},
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				host, port, err := net.SplitHostPort(addr)
 				if err != nil {
@@ -373,14 +377,16 @@ func (r *Resolver) HasAPI() bool {
 	return r != nil && r.api != nil
 }
 
-// truncateForError 防止把超长输入原样写进日志/错误信息。
+// truncateForError 防止把超长输入原样写进日志/错误信息，并按 Unicode 字符安全截断，
+// 避免在多字节中文中间切开产生非法 UTF-8 序列导致 PostgreSQL 拒绝写入。
 func truncateForError(s string) string {
-	const max = 64
-	s = strings.TrimSpace(s)
-	if len(s) <= max {
+	const maxRunes = 64
+	s = strings.ToValidUTF8(strings.TrimSpace(s), "")
+	runes := []rune(s)
+	if len(runes) <= maxRunes {
 		return s
 	}
-	return s[:max] + "…"
+	return string(runes[:maxRunes]) + "…"
 }
 
 // ---------------------------------------------------------------------------
@@ -454,12 +460,15 @@ type ipAPIResponse struct {
 
 // Lookup 实现 APIProvider。
 func (p IPAPI) Lookup(ctx context.Context, client *http.Client, ip string) (*Info, error) {
-	base := p.BaseURL
+	if client == nil {
+		client = safeClient
+	}
+	base := strings.TrimSpace(p.BaseURL)
 	if base == "" {
 		base = "http://ip-api.com/json"
 	}
-	// 明确只要这些字段，减小响应体；fields 是 ip-api 的正式参数。
-	endpoint := strings.TrimRight(base, "/") + "/" + ip +
+	// 明确只要这些字段，减小响应体；fields 是 ip-api 的正式参数；路径段做转义防调用方绕过直接注入路径。
+	endpoint := strings.TrimRight(base, "/") + "/" + url.PathEscape(strings.TrimSpace(ip)) +
 		"?fields=status,message,country,countryCode,city,regionName,isp,org,as,query"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)

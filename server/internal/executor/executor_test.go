@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,5 +80,40 @@ func TestResultWritebackRetriesAndKeepsReaperVerdict(t *testing.T) {
 	}
 	if 8*time.Minute+resultWritebackTimeout >= 10*time.Minute {
 		t.Fatal("preset budget plus write-back must stay under the 10-minute reaper threshold")
+	}
+}
+
+// 验证执行器 Start 同步登记生命周期后紧接取消与 Wait，无竞态且确保调度循环与在途任务全部退出。
+func TestExecutorStartAndWaitExitsWithoutSleepOrRace(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		var loopExited atomic.Bool
+		var taskExited atomic.Bool
+		e := New(nil, nil, 1, nil)
+		e.runBody = func(ctx context.Context) {
+			<-ctx.Done()
+			// 模拟取消瞬间刚提交领取并派生在途任务，验证 Wait 会先等循环结束再等 wg 归零。
+			e.wg.Add(1)
+			go func() {
+				defer e.wg.Done()
+				taskExited.Store(true)
+			}()
+			loopExited.Store(true)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		e.Start(ctx)
+		cancel()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			e.Wait()
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("第 %d 轮执行器取消后 Wait 超时未返回", i)
+		}
+		if !loopExited.Load() || !taskExited.Load() {
+			t.Fatalf("第 %d 轮 Wait 抢跑返回: loop=%v task=%v", i, loopExited.Load(), taskExited.Load())
+		}
 	}
 }

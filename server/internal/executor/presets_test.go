@@ -96,6 +96,13 @@ func TestKernelRebootProtectsTeyirConsoleAndInvalidPresetJSONRejected(t *testing
 	if !strings.Contains(script, "teyir-console") || !strings.Contains(script, "hy2-ops-console") {
 		t.Fatalf("kernel_reboot 必须同时匹配 teyir-console 与 hy2-ops-console 容器名，防止误重启面板宿主机")
 	}
+	if !strings.Contains(script, "teyir-console-api") || !strings.Contains(script, "hy2-ops-console-api") {
+		t.Fatalf("kernel_reboot 必须同时检测宿主机 systemd 面板服务，防止裸机部署宿主机被误重启")
+	}
+	f2b := systemPresets["install_fail2ban"].Script
+	if !strings.Contains(f2b, `exit 3`) {
+		t.Fatalf("install_fail2ban 包安装失败时应立即非零退出，避免继续写入配置")
+	}
 	e := &Executor{}
 	if _, _, err := e.runPreset(t.Context(), task{parameters: []byte(`{not-json`), allowWrite: true}); err == nil || !strings.Contains(err.Error(), "合法 JSON") {
 		t.Fatalf("非法 JSON 参数应直接报格式错误，实际: %v", err)

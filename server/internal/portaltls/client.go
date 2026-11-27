@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -76,31 +78,92 @@ func Client(base *http.Client, endpoint string) (*http.Client, error) {
 }
 
 // lookupPin 按源站（scheme://host）、主机含端口（host）、裸主机名（hostname）顺序查找指纹，
-// 支持大小写不敏感匹配，避免配置了大写域名或带协议前缀的源站键时静默漏配。
+// 支持大小写不敏感匹配以及默认端口（https:443 / http:80）等价归一，避免省略或显式写默认端口时漏配指纹。
 func lookupPin(pins map[string]string, u *url.URL) string {
-	candidates := make([]string, 0, 3)
-	if u.Scheme != "" && u.Host != "" {
-		candidates = append(candidates, strings.ToLower(u.Scheme)+"://"+u.Host)
+	scheme := strings.ToLower(strings.TrimSpace(u.Scheme))
+	host := strings.ToLower(strings.TrimSpace(u.Host))
+	hostname := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	port := strings.TrimSpace(u.Port())
+
+	defaultPort := ""
+	switch scheme {
+	case "https":
+		defaultPort = "443"
+	case "http":
+		defaultPort = "80"
 	}
-	if u.Host != "" {
-		candidates = append(candidates, u.Host)
+
+	var hostNoDefault, hostWithDefault string
+	if hostname != "" {
+		if port == "" || port == defaultPort {
+			// IPv6 主机名在源站或带端口表达中需补齐方括号。
+			hostNoDefault = formatHostOnly(hostname)
+			if defaultPort != "" {
+				hostWithDefault = net.JoinHostPort(hostname, defaultPort)
+			}
+		} else {
+			hostWithDefault = host
+		}
 	}
-	if h := u.Hostname(); h != "" && h != u.Host {
-		candidates = append(candidates, h)
+
+	candidates := make([]string, 0, 6)
+	addCandidate := func(c string) {
+		c = strings.TrimRight(strings.ToLower(strings.TrimSpace(c)), "/")
+		if c == "" {
+			return
+		}
+		for _, exist := range candidates {
+			if exist == c {
+				return
+			}
+		}
+		candidates = append(candidates, c)
 	}
-	for _, key := range candidates {
-		if v := strings.TrimSpace(pins[key]); v != "" {
-			return v
+	if scheme != "" && host != "" {
+		addCandidate(scheme + "://" + host)
+	}
+	if scheme != "" && hostNoDefault != "" {
+		addCandidate(scheme + "://" + hostNoDefault)
+	}
+	if scheme != "" && hostWithDefault != "" {
+		addCandidate(scheme + "://" + hostWithDefault)
+	}
+	addCandidate(host)
+	addCandidate(hostWithDefault)
+	addCandidate(hostNoDefault)
+	addCandidate(hostname)
+
+	// 先做归一化键表构建并按字典序稳定处理等价键，消除 Go 映射随机迭代顺序带来的不确定性。
+	keys := make([]string, 0, len(pins))
+	for k := range pins {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	normalized := make(map[string]string, len(pins))
+	for _, k := range keys {
+		v := strings.TrimSpace(pins[k])
+		if v == "" {
+			continue
+		}
+		nk := strings.TrimRight(strings.ToLower(strings.TrimSpace(k)), "/")
+		if nk == "" {
+			continue
+		}
+		if _, exists := normalized[nk]; !exists {
+			normalized[nk] = v
 		}
 	}
 	for _, want := range candidates {
-		for k, v := range pins {
-			if strings.EqualFold(strings.TrimRight(strings.TrimSpace(k), "/"), want) {
-				if trimmed := strings.TrimSpace(v); trimmed != "" {
-					return trimmed
-				}
-			}
+		if v := normalized[want]; v != "" {
+			return v
 		}
 	}
 	return ""
+}
+
+func formatHostOnly(hostname string) string {
+	if strings.Contains(hostname, ":") && !strings.HasPrefix(hostname, "[") {
+		return "[" + hostname + "]"
+	}
+	return hostname
 }

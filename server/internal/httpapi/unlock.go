@@ -119,7 +119,11 @@ func (s *Server) refreshNodeUnlock(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := r.PathValue("id")
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
+	}
 	var exists bool
 	if err := s.db.QueryRow(r.Context(), `SELECT true FROM hysteria_nodes WHERE id=$1::uuid AND deleted_at IS NULL`, nodeID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

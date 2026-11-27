@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, AlertTriangle, ArrowDown, ArrowUp, Cpu, Gauge, Globe, RefreshCw,
   Search, Server as ServerIcon, Wifi, Zap, Loader2, LayoutGrid, List, ChevronRight,
@@ -394,6 +394,11 @@ export function NodeMonitoringPage({ notify }: Props) {
     }
   }
 
+  const runSpeedtestRef = useRef(runSpeedtest)
+  runSpeedtestRef.current = runSpeedtest
+  const handleOpenNode = useCallback((node: MonitoringNode) => setSelected(node), [])
+  const handleNodeSpeedtest = useCallback((node: MonitoringNode) => { void runSpeedtestRef.current(node) }, [])
+
   const nodes = data?.nodes ?? []
   const stats = useMemo(() => {
     const online = nodes.filter((n) => n.node_status === 'online').length
@@ -529,7 +534,7 @@ export function NodeMonitoringPage({ notify }: Props) {
             <RefreshCw size={15} className={loading ? 'spin' : ''} />刷新
           </button>
           <button className="button button-primary" onClick={() => void runSpeedtest()} disabled={testing || viewer} title={viewer ? '只读账号不能发起测速' : undefined}>
-            <Zap size={16} />{testing ? '已提交…' : '立即测速'}
+            <Zap size={16} />{testing ? '提交中…' : '立即测速'}
           </button>
         </div>
       </div>
@@ -618,8 +623,8 @@ export function NodeMonitoringPage({ notify }: Props) {
           : error && !data ? <div className="empty-state"><AlertTriangle size={20} /><strong>暂时无法读取节点</strong><span>请检查连接后刷新，读取失败不代表节点离线。</span></div>
           : nodes.length === 0 ? <div className="empty-state"><ServerIcon size={20} /><strong>还没有节点</strong><span>到「HY2 节点」页接入节点后，这里会显示状态与三网数据。</span></div>
           : filteredNodes.length === 0 ? <div className="empty-state"><Search size={20} /><strong>没有符合条件的节点</strong><button className="button button-quiet" onClick={() => { setNodeQuery(''); setRegion(''); setNodeFilter('all') }}>清除筛选</button></div>
-          : view === 'cards' ? <div className="node-monitor-grid">{filteredNodes.map((node) => <NodeCard key={node.node_id} node={node} onOpen={() => setSelected(node)} testing={testingNodes.has(node.node_id)} readOnly={viewer} onSpeedtest={() => void runSpeedtest(node)} />)}</div>
-          : <NodeTable nodes={filteredNodes} testingNodes={testingNodes} readOnly={viewer} onOpen={setSelected} onSpeedtest={(node) => void runSpeedtest(node)} />}
+          : view === 'cards' ? <div className="node-monitor-grid">{filteredNodes.map((node) => <NodeCard key={node.node_id} node={node} onOpen={handleOpenNode} testing={testingNodes.has(node.node_id)} readOnly={viewer} onSpeedtest={handleNodeSpeedtest} />)}</div>
+          : <NodeTable nodes={filteredNodes} testingNodes={testingNodes} readOnly={viewer} onOpen={handleOpenNode} onSpeedtest={handleNodeSpeedtest} />}
       </section>
 
       <div className="monitor-analysis">
@@ -704,7 +709,7 @@ function ResourceMeter({ node, value, label }: { node: MonitoringNode; value: nu
   </span>
 }
 
-function NodeTable({ nodes, testingNodes, readOnly, onOpen, onSpeedtest }: { nodes: MonitoringNode[]; testingNodes: Set<string>; readOnly: boolean; onOpen: (node: MonitoringNode) => void; onSpeedtest: (node: MonitoringNode) => void }) {
+const NodeTable = memo(function NodeTable({ nodes, testingNodes, readOnly, onOpen, onSpeedtest }: { nodes: MonitoringNode[]; testingNodes: Set<string>; readOnly: boolean; onOpen: (node: MonitoringNode) => void; onSpeedtest: (node: MonitoringNode) => void }) {
   return <div className="monitor-table-scroll" tabIndex={0} role="region" aria-label="节点列表，可横向滚动">
     <table className="monitor-table">
       <thead><tr><th scope="col">节点 / 状态原因</th><th scope="col">状态</th><th scope="col">TCP 延迟</th><th scope="col">CPU / 内存</th><th scope="col">电信 / 联通 / 移动 / 公共</th><th scope="col">24h 出站 / 入站</th><th scope="col">用户</th><th scope="col">操作</th></tr></thead>
@@ -724,10 +729,10 @@ function NodeTable({ nodes, testingNodes, readOnly, onOpen, onSpeedtest }: { nod
       })}</tbody>
     </table>
   </div>
-}
+})
 
 // 卡片用于巡检，列表用于横向比较；两者共用状态与资源的显示语义。
-function NodeCard({ node, onOpen, testing, readOnly, onSpeedtest }: { node: MonitoringNode; onOpen: () => void; testing: boolean; readOnly: boolean; onSpeedtest: () => void }) {
+const NodeCard = memo(function NodeCard({ node, onOpen, testing, readOnly, onSpeedtest }: { node: MonitoringNode; onOpen: (node: MonitoringNode) => void; testing: boolean; readOnly: boolean; onSpeedtest: (node: MonitoringNode) => void }) {
   const unstable = node.node_status === 'warning'
   const summary = node.speedtest
 
@@ -803,8 +808,8 @@ function NodeCard({ node, onOpen, testing, readOnly, onSpeedtest }: { node: Moni
   const probeReason = nodeStatusReason(node)
 
   return (
-    <div className={`node-card${unstable ? ' is-warning' : node.node_status === 'offline' ? ' is-offline' : ''}`} onClick={onOpen} role="button" tabIndex={0}
-      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen() } }}>
+    <div className={`node-card${unstable ? ' is-warning' : node.node_status === 'offline' ? ' is-offline' : ''}`} onClick={() => onOpen(node)} role="button" tabIndex={0}
+      onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); onOpen(node) } }}>
       <div className="node-card-head">
         {/* 状态点三态：在线（绿）/ 不稳定（琥珀）/ 离线（灰）。
             原来只有 online/offline 两种，warning 会被渲染成绿点 ——
@@ -814,7 +819,7 @@ function NodeCard({ node, onOpen, testing, readOnly, onSpeedtest }: { node: Moni
           <small>{node.region || node.provider || node.host}</small>
         </div>
         <button type="button" className="node-card-speed" title={readOnly ? '只读账号不能发起测速' : '只测这一个节点的三网延迟'} aria-label={`测速 ${node.server_name || node.node_name}`} disabled={readOnly || testing}
-          onClick={(e) => { e.stopPropagation(); onSpeedtest() }}>
+          onClick={(e) => { e.stopPropagation(); onSpeedtest(node) }}>
           {testing ? <Loader2 size={13} className="spin" /> : <Zap size={13} />}<span>{testing ? '测速中' : '测速'}</span>
         </button>
         <NodeStatus node={node} />
@@ -855,7 +860,7 @@ function NodeCard({ node, onOpen, testing, readOnly, onSpeedtest }: { node: Moni
       </div>
     </div>
   )
-}
+})
 
 // NodeDetailModal 是点开节点卡后的详情弹窗：把三个延迟口径、三网逐靶点结果
 // 都摊开，并明确标注各自测的是什么。

@@ -12,6 +12,11 @@ services:
         hard: 65535
     mem_limit: 384m
     memswap_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     environment:
       POSTGRES_DB: nodeops
       POSTGRES_USER: nodeops
@@ -56,7 +61,7 @@ services:
     restart: "no"
 
   api:
-    image: teyir-console-api:local
+    image: ${COMPOSE_PROJECT_NAME:-teyir-console}-api:local
     # 预留优雅停机窗口，确保 HTTP 排空与执行器状态回写完成。
     stop_grace_period: 60s
     read_only: true
@@ -64,6 +69,11 @@ services:
     security_opt: ["no-new-privileges:true"]
     pids_limit: 128
     tmpfs: ["/tmp:size=32m,mode=1777"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "/api", "--healthcheck"]
       interval: 30s
@@ -147,7 +157,7 @@ services:
 
   web:
     init: true
-    image: teyir-console-web:local
+    image: ${COMPOSE_PROJECT_NAME:-teyir-console}-web:local
     build:
       context: .
       dockerfile: Dockerfile.web
@@ -157,6 +167,11 @@ services:
     read_only: true
     tmpfs: ["/tmp:size=32m,mode=1777"]
     pids_limit: 128
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # 优先探测容器内部回环健康端口（避免配置公网域名 SITE_ADDRESS 后自动 HTTPS 重定向导致探活失败），
     # 并在自定义旧 Caddyfile 场景下兼容回退到 http://127.0.0.1/。
     healthcheck:

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle, CalendarClock, Check, ChevronLeft, ChevronRight, Copy, ExternalLink,
@@ -75,7 +75,9 @@ function parseLocalDate(value: string): Date | null {
 // 同一份数据在不同页面显示成不同单位会让人怀疑哪个是对的。
 function formatDate(iso: string | null): string {
   if (!iso) return '从未'
-  return new Date(iso).toLocaleString('zh-CN', { hour12: false })
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  return d.toLocaleString('zh-CN', { hour12: false })
 }
 
 // humanLabel 把「商城订阅 · R5_TEST_ROUND_1_1790932912」压成「商城订阅 · R5_TEST_ROUND_1」。
@@ -247,6 +249,9 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   const [rotated, setRotated] = useState<{ label: string; url: string } | null>(null)
   const [rotatingKey, setRotatingKey] = useState(false)
   const [freshKey, setFreshKey] = useState('')
+  // 记录用户手动展开/折叠「商城对接」的状态；生成新密钥时强制保持展开，
+  // 修复 15 秒轮询或生成后刷新触发重渲染把 <details open={!store.enabled}> 意外合上、隐藏一次性明文密钥的缺陷。
+  const [storeOpen, setStoreOpen] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   // 分页（2026-10-03）：测试期间开出过 300+ 条订阅，页面一次性渲染全部
   // 表格行 —— 浏览器要建 300 个 DOM 行、滚动卡顿、想找一条记录得拖很久。
@@ -310,6 +315,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   }
 
   async function toggle(item: ManagedSubscription) {
+    if (busy) return
     const turningOn = !item.enabled
     // 2026-11-06：停用先确认：会在所有节点上停掉这个客户的账号，客户端立刻断开。原来行内图标一点即生效。
     if (!turningOn && !await askConfirm(`停用订阅「${item.label || '未命名订阅'}」？
@@ -347,6 +353,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   }
 
   async function resetIPs(item: ManagedSubscription) {
+    if (busy) return
     setBusy(true)
     try {
       await api.updateSubscriptionRecord(item.id, { reset_ips: true })
@@ -372,6 +379,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   // ⚠️ 但必须**如实报告失败节点** —— 部分成功时若只说"完成"，
   // 运维会以为全好了，而某个节点上的客户仍然连不上。
   async function reconcile(item: ManagedSubscription) {
+    if (busy) return
     setBusy(true)
     try {
       const res = await api.reconcileSubscription(item.id)
@@ -398,6 +406,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   // 这里把那句话原样透传给用户，不要自己另编一句
   // （服务端的说明带着「为什么」和「怎么办」，比前端转述准确）。
   async function reconcileAll() {
+    if (busy) return
     setBusy(true)
     try {
       const res = await api.reconcileAllSubscriptions()
@@ -416,7 +425,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   }
 
   async function confirmRotate() {
-    if (!rotating) return
+    if (!rotating || busy) return
     const target = rotating
     setRotating(null)
     setBusy(true)
@@ -440,7 +449,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   }
 
   async function confirmDelete() {
-    if (!pendingDelete) return
+    if (!pendingDelete || busy) return
     const target = pendingDelete
     setPendingDelete(null)
     setBusy(true)
@@ -458,12 +467,13 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   }
 
   async function rotateKey() {
-    if (!rotatingKey || readOnly) return
+    if (!rotatingKey || readOnly || busy) return
     setBusy(true)
     try {
       const result = await api.rotateStoreKey()
       if (mounted.current) {
         setFreshKey(result.key)
+        setStoreOpen(true)
         setRotatingKey(false)
       }
       notify('已生成新的对接密钥，旧密钥立即失效，请同步更新商城配置')
@@ -484,20 +494,23 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
   // "11 条里 3 条其实是关着的"。这类"总数里藏着异常"的指标等于没说。
   const disabled = subscriptions.length - active - expired
 
-  // ---- 分页 + 搜索（派生值，不另存 state）----
+  // ---- 分页 + 搜索（派生值，用 useMemo 避免无关状态变更时重复过滤与切片）----
   // ⚠️ 分页必须作用在**过滤之后**：先按 query 过滤再切片，
   // 否则"搜到 3 条却停在第 5 页"这种空页会让人以为搜错了。
   const q = query.trim().toLowerCase()
-  const filtered = q
+  const filtered = useMemo(() => (q
     ? subscriptions.filter((item) =>
         (item.label || '').toLowerCase().includes(q) ||
         (item.order_id || '').toLowerCase().includes(q) ||
         (item.user_email || '').toLowerCase().includes(q))
-    : subscriptions
+    : subscriptions), [subscriptions, q])
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
   // 页码夹到合法范围：删记录 / 改搜索词后 current 可能超出上限。
   const currentPage = Math.min(page, totalPages)
-  const pageItems = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const pageItems = useMemo(
+    () => filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE),
+    [filtered, currentPage],
+  )
 
   useEffect(() => {
     // 数据或搜索词变化后，把页码拉回第 1 页。
@@ -716,7 +729,7 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
                         ) : (
                           <span className="traffic-sub" title="各节点从各自计量基线起累计；基线前旧记账值单独保留，不计入真实累计">
                             {item.usage_started_at
-                              ? `计量起于 ${new Date(item.usage_started_at).toLocaleString()}`
+                              ? `计量起于 ${formatDate(item.usage_started_at)}`
                               : '统计起点未知'}
                             {item.usage_started_at_latest && item.usage_started_at_latest !== item.usage_started_at && ' · 节点起点不同'}
                           </span>
@@ -806,7 +819,11 @@ export function SubscriptionCenter({ notify }: { notify: (message: string) => vo
           `open` 由 store.enabled 决定初始态：没配密钥时展开（需要引导），
           配好了就收起（不需要天天看）。 */}
       {store && (
-        <details className="sub-collapse" open={!store.enabled}>
+        <details
+          className="sub-collapse"
+          open={Boolean(freshKey) || (storeOpen ?? !store.enabled)}
+          onToggle={(event) => setStoreOpen(event.currentTarget.open)}
+        >
           <summary>
             <span className="sub-collapse-title">
               <Store size={15} />
@@ -1010,6 +1027,11 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
   // 2026-11-06：节点 / 分类读取失败要说出来。原来失败时清成空数组：「自选节点」写「还没有节点」，
   // 分类下拉只剩「请选择分类」—— 看起来像没节点、没分类，而不是读取失败。
   const [scopeLoadError, setScopeLoadError] = useState('')
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   useEffect(() => {
     let alive = true
     api.nodes().then((list) => { if (alive) setAllNodes(list) }).catch((err) => {
@@ -1044,6 +1066,7 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
   }
 
   async function submit() {
+    if (busy) return
     const value = Number(days)
     const ips = Number(ipLimit)
     if (!Number.isFinite(value) || value < 0 || value > 3650) {
@@ -1102,6 +1125,7 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
       notify(`已开通订阅：${result.label}，到期 ${result.expires_at_text}` +
         scopeText +
         provNote)
+      if (!mountedRef.current) return
       setCreated({
         delivery_url: result.delivery_url,
         subscription_url: result.subscription_url,
@@ -1116,7 +1140,7 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
     } catch (err) {
       notify(err instanceof Error ? `开通失败：${err.message}` : '开通失败')
     } finally {
-      setBusy(false)
+      if (mountedRef.current) setBusy(false)
     }
   }
 
@@ -1267,7 +1291,7 @@ function CreateSubscriptionDialog({ notify, onClose, onCreated }: {
           <input type="checkbox" checked={autoDelete} onChange={(event) => setAutoDelete(event.target.checked)} style={{ width: 16, height: 16 }} />
           <span>到期后自动删除（超出宽限期即清理，不可恢复；取消勾选则只停用、保留数据）</span>
         </label>
-        <label className="form-field"><span>备注</span><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="最多 256 字" /></label>
+        <label className="form-field"><span>备注</span><input value={note} maxLength={256} onChange={(event) => setNote(event.target.value)} placeholder="最多 256 字" /></label>
 
         {/* 节点范围：这条订阅包含哪些节点。全部 / 按分类 / 自选（多选）。 */}
         <div className="form-field">
@@ -1384,10 +1408,15 @@ function EditSubscriptionDialog({ item, notify, onClose, onSaved }: {
   // perpetual. Both are reachable from here, so the labels say so explicitly
   // instead of leaving the operator to guess.
   async function submit(patch: { extend?: number; clearExpiry?: boolean; setDate?: boolean }) {
+    if (busy) return
     const dateOnly = patch.clearExpiry || patch.setDate || patch.extend !== undefined
     const ips = Number(ipLimit)
     if (!dateOnly && (!Number.isInteger(ips) || ips < 0 || ips > 1000)) {
       notify('在线网络数需为 0-1000 之间的整数（0 表示不限）')
+      return
+    }
+    if (!dateOnly && note.trim().length > 256) {
+      notify('备注最多 256 个字符')
       return
     }
     const payload: Parameters<typeof api.updateSubscriptionRecord>[1] = dateOnly ? {} : {
@@ -1456,7 +1485,7 @@ function EditSubscriptionDialog({ item, notify, onClose, onSaved }: {
           <label className="form-field"><span>在线网络数（按公网 IP，0=不限）</span><input value={ipLimit} onChange={(event) => setIPLimit(event.target.value)} inputMode="numeric" /></label>
           <label className="form-field"><span>客户邮箱</span><input value={email} onChange={(event) => setEmail(event.target.value)} /></label>
         </div>
-        <label className="form-field"><span>备注</span><input value={note} onChange={(event) => setNote(event.target.value)} placeholder="最多 256 字" /></label>
+        <label className="form-field"><span>备注</span><input value={note} maxLength={256} onChange={(event) => setNote(event.target.value)} placeholder="最多 256 字" /></label>
         <label className="form-field" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <input type="checkbox" checked={autoDelete} onChange={(event) => setAutoDelete(event.target.checked)} style={{ width: 16, height: 16 }} />
           <span>到期后自动删除</span>

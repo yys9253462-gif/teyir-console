@@ -161,10 +161,12 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
 }) {
   const readOnly = loadSession()?.role === 'viewer'
   const eligible = nodes.filter((n) => n.has_basic)
+  const eligibleIds = new Set(eligible.map((n) => n.id))
   // 非管理员默认选一个自己能执行的操作（Reality 首次开启需要 install_xray，仅限管理员）。
   const [op, setOp] = useState<OpKey>(isAdminSession() ? 'reality' : 'bbr')
   const [bbrVersion, setBbrVersion] = useState('v1')
   const [selected, setSelected] = useState<string[]>([])
+  const activeSelected = selected.filter((id) => eligibleIds.has(id))
   const [rows, setRows] = useState<Record<string, RowState>>({})
   const [running, setRunning] = useState(false)
   const cancelled = useRef(false)
@@ -177,13 +179,13 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
   const cannotRun = readOnly || (!isAdminSession() && ADMIN_ONLY_OPS.has(op))
 
   async function start() {
-    if (cannotRun || running || !selected.length) return
+    if (cannotRun || running || !activeSelected.length) return
     const label = op === 'bbr' ? `开启 BBR ${bbrVersion}` : current.label
     const warn = current.off ? '\n\n⚠️ 关闭会断开该协议上的现有连接，用这个协议的客户需要换其它协议或重新导入订阅。' : ''
-    if (!await askConfirm(`确认对 ${selected.length} 台节点执行「${label}」？\n\n${current.hint}${warn}`)) return
+    if (!await askConfirm(`确认对 ${activeSelected.length} 台节点执行「${label}」？\n\n${current.hint}${warn}`)) return
     cancelled.current = false
     setRunning(true)
-    const targets = nodes.filter((n) => selected.includes(n.id))
+    const targets = eligible.filter((n) => activeSelected.includes(n.id))
     setRows(Object.fromEntries(targets.map((n) => [n.id, { status: 'queued', message: '' } as RowState])))
 
     const queue = [...targets]
@@ -218,7 +220,7 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
 
   const results = Object.values(rows)
   const count = (s: RowState['status']) => results.filter((r) => r.status === s).length
-  const failedIds = Object.entries(rows).filter(([, r]) => r.status === 'failed').map(([id]) => id)
+  const failedIds = Object.entries(rows).filter(([id, r]) => r.status === 'failed' && eligibleIds.has(id)).map(([id]) => id)
 
   return <Modal title="批量运维" kicker="BATCH NODE OPS" wide onClose={async () => { if (!running || await askConfirm('仍有节点在执行，关闭后进行中的节点会继续跑完，但看不到结果。确认关闭？')) onClose() }}>
     <div style={{ color: 'var(--text)', fontSize: 'var(--fs-sm)', lineHeight: 1.65 }}>
@@ -246,9 +248,9 @@ export function BatchNodeOps({ nodes, onClose, notify }: {
       <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
         <button className="button button-quiet" disabled={cannotRun || running || !eligible.length} onClick={() => setSelected(eligible.map((n) => n.id))}>全选可操作（{eligible.length}）</button>
         {!running && failedIds.length > 0 && <button className="button button-quiet" disabled={cannotRun} onClick={() => setSelected(failedIds)}>只选失败的（{failedIds.length}）</button>}
-        <button className="button button-quiet" disabled={cannotRun || running || !selected.length} onClick={() => setSelected([])}>清空选择</button>
-        <button className="button button-primary" disabled={cannotRun || running || !selected.length} onClick={() => void start()}>
-          {running ? '执行中…' : `开始执行（${selected.length}）`}
+        <button className="button button-quiet" disabled={cannotRun || running || !activeSelected.length} onClick={() => setSelected([])}>清空选择</button>
+        <button className="button button-primary" disabled={cannotRun || running || !activeSelected.length} onClick={() => void start()}>
+          {running ? '执行中…' : `开始执行（${activeSelected.length}）`}
         </button>
         {running && <button className="button button-quiet" onClick={() => { cancelled.current = true }}>停止剩余节点</button>}
       </div>

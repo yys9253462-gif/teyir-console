@@ -353,8 +353,14 @@ func sanitizeParamsForAudit(form map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(form))
 	for k, v := range form {
-		if portalAuditOmitted[strings.ToLower(k)] && v != "" {
+		lower := strings.ToLower(k)
+		if portalAuditOmitted[lower] && v != "" {
 			out[k] = "(已省略)"
+			continue
+		}
+		// HTTP 代理出站地址可能内嵌 user:pass，写入审计前必须先抹掉密码段。
+		if lower == "url" && v != "" {
+			out[k] = redactProxyURL(v)
 			continue
 		}
 		out[k] = v
@@ -504,9 +510,10 @@ func (s *Server) portalNodeAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		// portal 的业务错误（400 Invalid action 之类）在这里透传出去，
-		// 因为那通常正是操作者需要的诊断信息。
-		s.logger.Warn("portal action failed", "node", nodeID, "verb", input.Verb, "error", err)
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		// 先经过凭据脱敏避免路径令牌或口令回显给前端与日志。
+		safeErr := redactPortalError(err.Error(), target)
+		s.logger.Warn("portal action failed", "node", nodeID, "verb", input.Verb, "error", safeErr)
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": safeErr})
 		return
 	}
 

@@ -38,6 +38,7 @@ import (
 	"net/url"
 	"nodeops/server/internal/portaltls"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -153,6 +154,10 @@ func newAlertNotifier() *alertNotifier {
 func (n *alertNotifier) markSent(alertID string) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	// 防止永不恢复的历史告警持续占用内存；清理后仍有 alerts.notified_at 持久化列兜底恢复通知。
+	if len(n.sent) >= 2048 {
+		n.sent = map[string]bool{}
+	}
 	n.sent[alertID] = true
 }
 
@@ -344,9 +349,18 @@ func (s *Server) deliverAlert(ev alertNotification) bool {
 	if s.alertTypeMuted(context.Background(), ev.AlertType) {
 		return false
 	}
-	// Telegram 与 Webhook 并行、互不依赖（只配了其中一个也能收到）。
+	// Telegram 与 Webhook 并行、互不依赖（只配了其中一个也能收到）；协程内加异常恢复防止阻塞主通道。
 	telegramOK := make(chan bool, 1)
-	go func() { telegramOK <- s.notifyTelegram(ev) }()
+	go func() {
+		ok := false
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("alert notify: telegram goroutine panic", "panic", rec, "stack", string(debug.Stack()))
+			}
+			telegramOK <- ok
+		}()
+		ok = s.notifyTelegram(ev)
+	}()
 	webhookOK := s.deliverWebhook(ev)
 	return <-telegramOK || webhookOK
 }

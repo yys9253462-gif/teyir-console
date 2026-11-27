@@ -314,7 +314,7 @@ WHERE n.deleted_at IS NULL AND n.server_id <> $1::uuid`, probeID)
 		return 0, err
 	}
 	rows.Close()
-	persistFailed := 0
+	unprobeablePersistFailed := 0
 	for _, t := range unprobeable {
 		if _, err := s.db.Exec(ctx, `
 INSERT INTO node_block_checks (node_id, probe_server_id, target_ip, tcp_port, tcp_ok, ping_ok, blocked, detail, checked_at)
@@ -323,12 +323,12 @@ ON CONFLICT (node_id) DO UPDATE SET probe_server_id=EXCLUDED.probe_server_id, ta
   tcp_port=NULL, tcp_ok=NULL, ping_ok=NULL, blocked=NULL, detail=EXCLUDED.detail, checked_at=now()`,
 			t.nodeID, probeID, t.ip, "主机地址不是 IP，无法从国内探测点检测；请在主机页把地址改成公网 IP"); err != nil {
 			s.logger.Warn("block check: persist skip reason failed", "node", t.nodeID, "error", err)
-			persistFailed++
+			unprobeablePersistFailed++
 		}
 	}
 	if len(targets) == 0 {
-		if persistFailed > 0 {
-			return 0, blockCheckPersistError{persistFailed}
+		if unprobeablePersistFailed > 0 {
+			return 0, blockCheckPersistError{unprobeablePersistFailed}
 		}
 		return 0, nil
 	}
@@ -358,6 +358,7 @@ ON CONFLICT (node_id) DO UPDATE SET probe_server_id=EXCLUDED.probe_server_id, ta
 			results[f[0]] = [2]bool{f[1] == "yes", f[2] == "yes"}
 		}
 	}
+	targetPersistFailed := 0
 	for _, t := range targets {
 		r, ok := results[t.nodeID]
 		var tcpOK, pingOK, blocked *bool
@@ -383,14 +384,15 @@ VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, now())
 ON CONFLICT (node_id) DO UPDATE SET probe_server_id=EXCLUDED.probe_server_id, target_ip=EXCLUDED.target_ip,
   tcp_port=EXCLUDED.tcp_port, tcp_ok=EXCLUDED.tcp_ok, ping_ok=EXCLUDED.ping_ok, blocked=EXCLUDED.blocked,
   detail=EXCLUDED.detail, checked_at=now()`, t.nodeID, probeID, t.ip, t.port, tcpOK, pingOK, blocked, detail); err != nil {
-			// 2026-11-06：写不进去 = 这台节点的结论没落地（页面与告警还停在旧数据）。
-			// 原来只记一条 Warn 仍返回 len(targets)，接口回 200「已检测 N 台」，实际一条结论都没有。
+			// 写不进去代表该节点结论未落地（页面与告警仍停在旧数据）。
 			s.logger.Warn("block check: persist failed", "node", t.nodeID, "error", err)
-			persistFailed++
+			targetPersistFailed++
 		}
 	}
-	if persistFailed > 0 {
-		return len(targets) - persistFailed, blockCheckPersistError{persistFailed}
+	totalPersistFailed := unprobeablePersistFailed + targetPersistFailed
+	if totalPersistFailed > 0 {
+		// 仅扣除 targets 自身的落库失败数，防止 unprobeable 落库失败把已检测数量扣成负数。
+		return len(targets) - targetPersistFailed, blockCheckPersistError{totalPersistFailed}
 	}
 	return len(targets), nil
 }

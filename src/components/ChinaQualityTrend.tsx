@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { api, type ChinaQualityRange, type ChinaQualityResponse, type ChinaQualitySeries } from '../lib/api'
 
@@ -42,7 +42,10 @@ function axisLabel(t: number, range: ChinaQualityRange) {
   return range === '24h' ? `${pad(d.getHours())}:${pad(d.getMinutes())}` : `${d.getMonth() + 1}/${d.getDate()}`
 }
 
-function LineChart({ series, pick, max, unit, range, from, to, label }: {
+const pickAvgMs = (p: ChinaQualitySeries['points'][number]) => p.avg_ms
+const pickLossPct = (p: ChinaQualitySeries['points'][number]) => p.loss_pct
+
+const LineChart = memo(function LineChart({ series, pick, max, unit, range, from, to, label }: {
   series: ChinaQualitySeries[]
   pick: (p: ChinaQualitySeries['points'][number]) => number | null
   max: number
@@ -89,7 +92,7 @@ function LineChart({ series, pick, max, unit, range, from, to, label }: {
       })}
     </svg>
   )
-}
+})
 
 export function ChinaQualityTrend({ nodeId }: { nodeId: string }) {
   const [range, setRange] = useState<ChinaQualityRange>('24h')
@@ -151,9 +154,9 @@ export function ChinaQualityTrend({ nodeId }: { nodeId: string }) {
             ))}
           </div>
           <div className="cq-label">平均延迟</div>
-          <LineChart series={seriesList} pick={(p) => p.avg_ms} max={view.msMax} unit="" range={range} from={view.from} to={view.to} label="三网平均延迟趋势图" />
+          <LineChart series={seriesList} pick={pickAvgMs} max={view.msMax} unit="" range={range} from={view.from} to={view.to} label="三网平均延迟趋势图" />
           <div className="cq-label">平均丢包</div>
-          <LineChart series={seriesList} pick={(p) => p.loss_pct} max={view.lossMax} unit="%" range={range} from={view.from} to={view.to} label="三网平均丢包趋势图" />
+          <LineChart series={seriesList} pick={pickLossPct} max={view.lossMax} unit="%" range={range} from={view.from} to={view.to} label="三网平均丢包趋势图" />
           <p className="form-note">
             每个点是该时段内该运营商全部靶点的平均。单个靶点偶尔全丢包属正常（禁 ping / 限速），
             持续丢包 ≥30% 超过 1 小时会进入告警并推送。

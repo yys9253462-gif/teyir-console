@@ -67,8 +67,12 @@ func (s *Server) writeSubscriptionLockError(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// 独立连接持有跨进程advisory锁，不占业务连接池，避免锁等待耗尽连接池。
+// 独立连接持有跨进程咨询锁，不占业务连接池，避免锁等待耗尽连接池。
 func (s *Server) lockSubscription(ctx context.Context, id string) (context.Context, func(), error) {
+	// 统一规范为小写标准标识，避免大写路径参数算出不同锁键导致跨进程互斥失效或重入判定失配。
+	if norm, ok := canonicalUUID(id); ok {
+		id = norm
+	}
 	if held, _ := ctx.Value(subscriptionLockKey{}).(string); held == id {
 		return ctx, func() {}, nil
 	}
@@ -132,8 +136,8 @@ func (s *Server) lockSubscription(ctx context.Context, id string) (context.Conte
 
 func (s *Server) subscriptionMutation(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		id := r.PathValue("id")
-		if !uuidPattern.MatchString(id) {
+		id, ok := canonicalUUID(r.PathValue("id"))
+		if !ok {
 			next(w, r)
 			return
 		}

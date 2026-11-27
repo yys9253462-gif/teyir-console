@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,8 +151,16 @@ func sendWithOneRetry(ctx context.Context, send func(context.Context) error) err
 	return attempt()
 }
 
+// telegramToken 安全读取电报机器人令牌，在未初始化密钥库时返回空串防空指针崩溃。
+func (s *Server) telegramToken() string {
+	if s == nil || s.purityKeys == nil {
+		return ""
+	}
+	return s.purityKeys.Get(ippurity.KeyTelegram)
+}
+
 func (s *Server) sendTelegram(ctx context.Context, chatID, text string) error {
-	token := s.purityKeys.Get(ippurity.KeyTelegram)
+	token := s.telegramToken()
 	if token == "" || chatID == "" {
 		return errors.New("未配置 Telegram Bot Token 或 Chat ID")
 	}
@@ -167,7 +176,7 @@ func (s *Server) notifyTelegram(ev alertNotification) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	chat := s.telegramChatID(ctx)
-	if chat == "" || s.purityKeys.Get(ippurity.KeyTelegram) == "" {
+	if chat == "" || s.telegramToken() == "" {
 		return false
 	}
 	icon := map[string]string{"triggered": "🔴", "reopened": "🔴", "repeated": "🔴", "resolved": "✅", "acknowledged": "🟡"}[ev.Event]
@@ -258,6 +267,14 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 	busyNotice := "⏳ 机器人正在处理前面的操作，这一条没有执行，请稍后重新发送 / 点击。"
 
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				if s.logger != nil {
+					s.logger.Error("telegram bot poll loop panic", "panic", rec, "stack", string(debug.Stack()))
+				}
+				noteTelegramError("机器人轮询循环异常退出，请查看服务端日志")
+			}
+		}()
 		var offset int64
 		lastToken := ""
 		menuToken := ""
@@ -270,7 +287,7 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 				return
 			default:
 			}
-			token := s.purityKeys.Get(ippurity.KeyTelegram)
+			token := s.telegramToken()
 			if token == "" {
 				sleepCtx(ctx, 30*time.Second)
 				continue
@@ -386,7 +403,7 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 						dispatch(func() {
 							s.telegramCallback(ctx, cb.ID, strconv.FormatInt(cb.Message.Chat.ID, 10), strconv.FormatInt(cb.From.ID, 10), cb.Data)
 						}, false, func() {
-							_ = telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "answerCallbackQuery", map[string]any{"callback_query_id": cb.ID, "text": busyNotice, "show_alert": true}, nil)
+							_ = telegramCall(ctx, s.telegramToken(), "answerCallbackQuery", map[string]any{"callback_query_id": cb.ID, "text": busyNotice, "show_alert": true}, nil)
 						})
 					}
 					continue
@@ -406,11 +423,15 @@ func (s *Server) StartTelegramBot(ctx context.Context) {
 				staleWrite := u.Message.Date > 0 && time.Now().Unix()-u.Message.Date > 300 && cmd == "/api" && !isTelegramReadOnlyAPI(text)
 				quick := cmd == "/menu" || cmd == "/start" || cmd == "/hide" || cmd == "/cancel" || cmd == "/status" || text == "🙈 收起菜单" || text == "🏠 主菜单"
 				dispatch(func() {
+					isOwner := telegramPrivateOwner(s.telegramChatID(ctx), chatID, sender)
 					if staleWrite {
-						s.sendTelegram(ctx, chatID, "这条操作消息已过期，请重新从菜单发起。")
+						// 仅对已绑定的私聊本人提示操作过期，避免向未授权陌生人暴露控制指令。
+						if isOwner {
+							_ = s.sendTelegram(ctx, chatID, "这条操作消息已过期，请重新从菜单发起。")
+						}
 						return
 					}
-					if telegramPrivateOwner(s.telegramChatID(ctx), chatID, sender) && s.telegramControlMessage(ctx, chatID, sender, text) {
+					if isOwner && s.telegramControlMessage(ctx, chatID, sender, text) {
 						return
 					}
 					s.handleTelegramMessage(ctx, chatID, text)
@@ -611,6 +632,12 @@ WHERE a.status = 'open' ORDER BY a.severity = 'critical' DESC, a.last_seen_at DE
 
 // GET /api/settings/telegram
 func (s *Server) getTelegramSettings(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		claims, _ := claimsFrom(r.Context())
+		if !s.enforceReadLimit(w, claims.Subject) {
+			return
+		}
+	}
 	telegramBotStatus.Lock()
 	st := map[string]any{
 		"bot_username":   telegramBotStatus.BotUsername,
@@ -628,7 +655,7 @@ func (s *Server) getTelegramSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"token_configured":     s.purityKeys.Get(ippurity.KeyTelegram) != "",
+		"token_configured":     s.telegramToken() != "",
 		"control_private_only": true,
 		"control_routes":       len(s.telegramControl.Routes),
 		"menu_commands":        telegramCommands(),
@@ -674,22 +701,26 @@ ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`, telegra
 
 // POST /api/settings/telegram/test
 func (s *Server) testTelegram(w http.ResponseWriter, r *http.Request) {
+	claims, _ := claimsFrom(r.Context())
+	if !s.enforceWriteLimit(w, claims.Subject) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	// 2026-11-06：没填 Chat ID / Token 时直接说缺什么。原来照样去调 Telegram，回一句看不懂的 502（chat not found 之类）。
-	if s.telegramChatID(ctx) == "" {
+	// 没填 Chat ID / Token 时直接提示缺项，并复用同一次查库结果。
+	chat := s.telegramChatID(ctx)
+	if chat == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "还没有保存 Chat ID：先给机器人发 /start 拿到 Chat ID 并保存"})
 		return
 	}
-	if s.purityKeys == nil || s.purityKeys.Get(ippurity.KeyTelegram) == "" {
+	if s.telegramToken() == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "还没有配置 Bot Token：先在上一步保存机器人 Token"})
 		return
 	}
-	if err := s.sendTelegram(ctx, s.telegramChatID(ctx), "✅ Teyir 控制台测试消息：告警会发到这里。发送 /help 查看可用命令。"); err != nil {
+	if err := s.sendTelegram(ctx, chat, "✅ Teyir 控制台测试消息：告警会发到这里。发送 /help 查看可用命令。"); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	chat := s.telegramChatID(ctx)
 	if telegramPrivateOwner(chat, chat, chat) {
 		if err := s.telegramMenu(ctx, chat); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "测试消息已发送，但菜单发送失败：" + err.Error()})

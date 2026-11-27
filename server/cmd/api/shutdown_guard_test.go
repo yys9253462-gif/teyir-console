@@ -22,6 +22,9 @@ func TestMainStartupTimeoutsAndBackgroundDrain(t *testing.T) {
 		"monitoringCancel()",
 		"collectorCancel()",
 		"metricsCollector.Start(collectorCtx)",
+		"taskExecutor.Start(executorCtx)",
+		"if cfg.SpeedtestIntervalMinutes > 0 {",
+		"<-alertDone",
 		"taskExecutor.Wait()",
 		"metricsCollector.Wait()",
 	} {
@@ -31,5 +34,8 @@ func TestMainStartupTimeoutsAndBackgroundDrain(t *testing.T) {
 	}
 	if strings.Contains(src, "go metricsCollector.Run(") {
 		t.Error("server/cmd/api/main.go 不得绕过 Start 直接派生 Run，避免启停瞬间与 Wait 竞态")
+	}
+	if strings.Contains(src, "go taskExecutor.Run(") {
+		t.Error("server/cmd/api/main.go 不得绕过 Start 直接派生执行器 Run，避免停机排空竞态")
 	}
 }

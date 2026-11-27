@@ -26,6 +26,19 @@ export function safeSameOriginPath(value: string | undefined | null): string | u
   }
 }
 
+// 仅允许绝对 http/https 外链：严格拦截相对路径、协议相对地址（//）、反斜杠歧义绕过、控制字符及危险协议（javascript:/data:/vbscript:）。
+export function safeExternalHttpUrl(value: string | undefined | null): string | undefined {
+  if (!value || CONTROL_CHARS.test(value)) return undefined
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.startsWith('/') || trimmed.includes('\\')) return undefined
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined
+  } catch {
+    return undefined
+  }
+}
+
 // 统一链接协议安全校验：仅允许绝对 http/https 或经同源复核的站内相对路径，
 // 彻底拦截 javascript:/data:/vbscript:/协议相对地址（//evil）、反斜杠跨站绕过（/\evil）与控制字符。
 export function safeHttpUrl(value: string | undefined | null): string | undefined {
@@ -42,8 +55,7 @@ export function safeHttpUrl(value: string | undefined | null): string | undefine
       if (parsed.origin !== baseUrl.origin) return undefined
       return parsed.href
     }
-    const parsed = new URL(trimmed)
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined
+    return safeExternalHttpUrl(trimmed)
   } catch {
     return undefined
   }

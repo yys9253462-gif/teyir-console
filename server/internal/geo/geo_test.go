@@ -2,6 +2,7 @@ package geo
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -645,5 +647,21 @@ func TestResolverCacheRespectsInjectedClock(t *testing.T) {
 	}
 	if api.calls != 2 {
 		t.Fatalf("推进注入时钟超过 TTL 后应重新查 API，实际调用 %d 次", api.calls)
+	}
+}
+
+// 验证超长中文错误信息截断后保持合法 UTF-8，且 safeClient 强制启用最低 TLS 1.2。
+func TestTruncateForErrorValidUTF8AndSafeClientTLS(t *testing.T) {
+	longCN := strings.Repeat("东京节点归属地址异常输入", 10)
+	got := truncateForError(longCN)
+	if !utf8.ValidString(got) {
+		t.Fatalf("截断中文后产生非法 UTF-8 字节: %q", got)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("超长输入应带省略号，实际 %q", got)
+	}
+	tr, ok := safeClient.Transport.(*http.Transport)
+	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+		t.Fatalf("geo safeClient 必须强制最低 TLS 1.2，实际 %+v", tr)
 	}
 }

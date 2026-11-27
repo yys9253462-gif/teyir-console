@@ -15,6 +15,12 @@ import { askConfirm } from './ConfirmHost'
 //   has_credential = true  → 有凭据快照，点一下就删掉
 //   has_credential = false → 凭据没了，**物理上无法重试**，只能人工上机
 // 混在一起展示会让运维对着"只能人工"的条目反复点重试。
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false })
+}
+
 export function OrphanAccounts({ notify }: { notify: (message: string) => void }) {
   const [orphans, setOrphans] = useState<OrphanAccount[]>([])
   const [showResolved, setShowResolved] = useState(false)
@@ -63,6 +69,7 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
   useEffect(() => { void load(showResolved) }, [load, showResolved])
 
   const pending = orphans.filter((o) => !o.resolved_at)
+  const resolved = orphans.filter((o) => Boolean(o.resolved_at))
   const retryable = pending.filter((o) => o.has_credential)
   // 2026-11-08：已删除节点按节点汇总。机器确认下线后可以整台一次结案，不用逐条点。
   const deletedNodeGroups = Object.values(pending.filter((o) => o.node_deleted).reduce<Record<string, { nodeId: string; nodeName: string; count: number }>>((acc, o) => {
@@ -202,8 +209,8 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
                       <td><div className="host-cell"><div className="host-icon offline"><AlertTriangle size={15} /></div><div><strong>{o.node_name}</strong><span>{o.node_api_url || '—'}</span></div></div></td>
                       <td><span className="traffic-sub">{o.user_id}</span></td>
                       <td><span className="traffic-sub">{o.reason || '—'}</span></td>
-                      <td><span className="traffic-sub">{o.attempts}{o.last_attempt_at ? ` · ${new Date(o.last_attempt_at).toLocaleString('zh-CN', { hour12: false })}` : ''}</span></td>
-                      <td><span className="traffic-sub">{new Date(o.created_at).toLocaleString('zh-CN', { hour12: false })}</span></td>
+                      <td><span className="traffic-sub">{o.attempts}{o.last_attempt_at ? ` · ${formatDateTime(o.last_attempt_at)}` : ''}</span></td>
+                      <td><span className="traffic-sub">{formatDateTime(o.created_at)}</span></td>
                       <td>
                         <button className="button button-primary" disabled={busy === o.id || !isAdminSession()}
                                 title={isAdminSession() ? '用留存的凭据在节点上删除这个账号' : '仅管理员可补删节点账号'}
@@ -242,7 +249,7 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
                       <td><span className="traffic-sub">{o.node_api_url || '—'}</span></td>
                       <td><span className="traffic-sub">{o.user_id}</span></td>
                       <td><span className="traffic-sub">{o.reason || '—'}</span></td>
-                      <td><span className="traffic-sub">{new Date(o.created_at).toLocaleString('zh-CN', { hour12: false })}</span></td>
+                      <td><span className="traffic-sub">{formatDateTime(o.created_at)}</span></td>
                       <td>
                         <button className="button button-quiet" disabled={busy === o.id || !isAdminSession()}
                                 title={isAdminSession() ? '机器已永久停用：不补删，直接结案' : '仅管理员可结案'}
@@ -257,10 +264,31 @@ export function OrphanAccounts({ notify }: { notify: (message: string) => void }
             </>
           )}
 
-          {pending.length === 0 && orphans.length > 0 && (
-            <p className="form-note" style={{ padding: '0 16px 16px' }}>
-              当前没有待处理条目，下面是已完成的历史。
-            </p>
+          {showResolved && resolved.length > 0 && (
+            <>
+              <div className="section-head servers-head" style={{ paddingTop: 10 }}>
+                <div>
+                  <h2 style={{ fontSize: 'var(--fs-sm)' }}>已处理历史 <span className="count-chip">{resolved.length}</span></h2>
+                  {pending.length === 0 && (
+                    <p className="form-note" style={{ marginTop: 2 }}>当前没有待处理条目，以下是已完成或已结案的历史记录。</p>
+                  )}
+                </div>
+              </div>
+              <div className="server-table-wrap"><table className="server-table">
+                <thead><tr><th>节点</th><th>账号</th><th>原因</th><th>处理时间</th><th>处理说明</th></tr></thead>
+                <tbody>
+                  {resolved.map((o) => (
+                    <tr key={o.id}>
+                      <td><div className="host-cell"><div className="host-icon online"><CheckCircle2 size={15} /></div><div><strong>{o.node_name}</strong><span>{o.node_deleted ? '节点已删除' : (o.node_api_url || '—')}</span></div></div></td>
+                      <td><span className="traffic-sub">{o.user_id}</span></td>
+                      <td><span className="traffic-sub">{o.reason || '—'}</span></td>
+                      <td><span className="traffic-sub">{formatDateTime(o.resolved_at)}</span></td>
+                      <td><span className="traffic-sub">{o.resolved_note || '已处理'}</span></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table></div>
+            </>
           )}
         </>
       )}

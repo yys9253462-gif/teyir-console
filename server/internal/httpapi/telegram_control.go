@@ -255,7 +255,7 @@ func (s *Server) telegramRich(ctx context.Context, chat, text string, rows [][]m
 	if len(rows) > 0 {
 		payload["reply_markup"] = map[string]any{"inline_keyboard": rows}
 	}
-	return telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "sendMessage", payload, nil)
+	return telegramCall(ctx, s.telegramToken(), "sendMessage", payload, nil)
 }
 func (s *Server) telegramMenu(ctx context.Context, chat string) error {
 	return s.telegramBottomMenu(ctx, chat)
@@ -658,7 +658,7 @@ func (s *Server) telegramControlMessage(ctx context.Context, chat, sender, text 
 	return true
 }
 func (s *Server) telegramCallback(ctx context.Context, id, chat, sender, data string) {
-	token := s.purityKeys.Get(ippurity.KeyTelegram)
+	token := s.telegramToken()
 	_ = telegramCall(ctx, token, "answerCallbackQuery", map[string]any{"callback_query_id": id}, nil)
 	if !telegramPrivateOwner(s.telegramChatID(ctx), chat, sender) {
 		return
@@ -845,7 +845,7 @@ func (s *Server) telegramBanConfirm(ctx context.Context, chat, ip string, isUnba
 	if isUnban {
 		prefix, verb = "tg:ubok:", "解除封禁"
 	}
-	_ = telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "sendMessage", map[string]any{
+	_ = telegramCall(ctx, s.telegramToken(), "sendMessage", map[string]any{
 		"chat_id": chat,
 		"text":    fmt.Sprintf("确认要%s %s 吗？两分钟内有效。", verb, ip),
 		"reply_markup": map[string]any{"inline_keyboard": [][]map[string]string{{{
@@ -963,7 +963,7 @@ func (s *Server) telegramBanIPAction(ctx context.Context, chat, ip string, isUnb
 		_ = s.sendTelegram(ctx, chat, fmt.Sprintf("⚠️ 操作未生效 (%s)：%s", ip, reason))
 		return false
 	}
-	token := s.purityKeys.Get(ippurity.KeyTelegram)
+	token := s.telegramToken()
 	if isUnban {
 		_ = telegramCall(ctx, token, "sendMessage", map[string]any{
 			"chat_id": chat,
@@ -1048,7 +1048,7 @@ func (s *Server) telegramBanQuery(ctx context.Context, chat, path, ip string) {
 		}
 		msg["reply_markup"] = map[string]any{"inline_keyboard": [][]map[string]string{{btn}}}
 	}
-	_ = telegramCall(ctx, s.purityKeys.Get(ippurity.KeyTelegram), "sendMessage", msg, nil)
+	_ = telegramCall(ctx, s.telegramToken(), "sendMessage", msg, nil)
 }
 
 // telegramPartialOutcome 识别「2xx 但没有全部生效」的响应：node_state_ok=false、failed_nodes>0，

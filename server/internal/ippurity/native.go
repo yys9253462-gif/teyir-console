@@ -106,12 +106,24 @@ func countryFromRDAP(n rdapNetwork) (string, bool) {
 	}
 	// ARIN：取 registrant 实体的地址国家。只认 registrant —— abuse / noc
 	// 联系人常是总部（如 AWS 一律是西雅图），用它会把所有海外段都判成 US。
-	for _, e := range n.Entities {
-		if !hasRole(e.Roles, "registrant") {
-			continue
+	// 支持递归查找嵌套实体（限深 4 层防恶意循环结构）。
+	return findRegistrantCountry(n.Entities, 4)
+}
+
+func findRegistrantCountry(entities []rdapEntity, maxDepth int) (string, bool) {
+	if maxDepth <= 0 {
+		return "", false
+	}
+	for _, e := range entities {
+		if hasRole(e.Roles, "registrant") {
+			if c, ok := vcardCountry(e.VCardArray); ok {
+				return c, true
+			}
 		}
-		if c, ok := vcardCountry(e.VCardArray); ok {
-			return c, true
+		if len(e.Entities) > 0 {
+			if c, ok := findRegistrantCountry(e.Entities, maxDepth-1); ok {
+				return c, true
+			}
 		}
 	}
 	return "", false

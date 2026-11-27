@@ -190,7 +190,11 @@ func (s *Server) serviceStatus(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return
 	}
-	id := r.PathValue("id")
+	id, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在或已删除"})
+		return
+	}
 
 	var (
 		host, user  string

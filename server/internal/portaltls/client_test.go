@@ -96,3 +96,31 @@ func TestClientSupportsOriginPrefixCaseAndDefaultTransport(t *testing.T) {
 		t.Fatal("源站指纹不匹配必须被拒绝")
 	}
 }
+
+// 验证默认端口（https:443 / http:80）与省略端口写法双向等价命中指纹，且非默认端口不会串扰。
+func TestLookupPinNormalizesDefaultPorts(t *testing.T) {
+	pin := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	other := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+	uNoPort, _ := url.Parse("https://node.example.com/api/v1/node/meta")
+	uWith443, _ := url.Parse("https://node.example.com:443/api/v1/node/meta")
+	uWith8443, _ := url.Parse("https://node.example.com:8443/api/v1/node/meta")
+	uV6NoPort, _ := url.Parse("https://[2001:db8::1]/api/v1/node/meta")
+	uV6With443, _ := url.Parse("https://[2001:db8::1]:443/api/v1/node/meta")
+
+	if got := lookupPin(map[string]string{"https://node.example.com:443": pin}, uNoPort); got != pin {
+		t.Fatalf("配置显式 :443 时省略端口的 https 地址应命中指纹，实际 %q", got)
+	}
+	if got := lookupPin(map[string]string{"https://node.example.com": pin}, uWith443); got != pin {
+		t.Fatalf("配置省略端口时显式 :443 的 https 地址应命中指纹，实际 %q", got)
+	}
+	if got := lookupPin(map[string]string{"https://node.example.com": pin, "https://node.example.com:8443": other}, uWith8443); got != other {
+		t.Fatalf("非默认端口应优先匹配自身源站指纹，实际 %q", got)
+	}
+	if got := lookupPin(map[string]string{"https://[2001:db8::1]:443": pin}, uV6NoPort); got != pin {
+		t.Fatalf("IPv6 源站显式 :443 应与省略端口等价命中，实际 %q", got)
+	}
+	if got := lookupPin(map[string]string{"https://[2001:db8::1]": pin}, uV6With443); got != pin {
+		t.Fatalf("IPv6 源站省略端口应与显式 :443 等价命中，实际 %q", got)
+	}
+}

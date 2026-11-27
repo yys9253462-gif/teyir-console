@@ -28,7 +28,7 @@ import (
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--healthcheck" {
-		port := os.Getenv("PORT")
+		port := strings.TrimSpace(os.Getenv("PORT"))
 		if port == "" {
 			port = "8080"
 		}
@@ -150,11 +150,15 @@ func main() {
 	// Doing it in the GET handler meant every browser poll wrote to the database.
 	alertCtx, alertCancel := context.WithCancel(context.Background())
 	defer alertCancel()
-	go runAlertReconciler(alertCtx, logger, handler, time.Duration(cfg.CollectorSeconds)*time.Second)
+	alertDone := make(chan struct{})
+	go func() {
+		defer close(alertDone)
+		runAlertReconciler(alertCtx, logger, handler, time.Duration(cfg.CollectorSeconds)*time.Second)
+	}()
 	executorCtx, executorCancel := context.WithCancel(context.Background())
 	defer executorCancel()
 	taskExecutor := executor.New(logger, pool, cfg.ExecutorSeconds, box)
-	go taskExecutor.Run(executorCtx)
+	taskExecutor.Start(executorCtx)
 	logger.Info("executor started", "interval_seconds", cfg.ExecutorSeconds)
 	// Subscription expiry is a wall-clock event, not a request. The sweeper
 	// lapses and purges on a timer so a shop-sold subscription stops working at
@@ -202,9 +206,14 @@ func main() {
 
 	// 节点监控：网络延迟探测 + 大陆三网测速。周期与采集器/执行器都不同
 	// （三网线路质量是慢变量），所以单独一个调度器与它自己的开关。
+	// SPEEDTEST_INTERVAL_MINUTES=0 明确表示禁用周期测速（手动触发仍可用），不得再传 0 触发默认 15 分钟兜底。
 	monitoringCtx, monitoringCancel := context.WithCancel(context.Background())
 	defer monitoringCancel()
-	handler.StartMonitoringScheduler(monitoringCtx, time.Duration(cfg.SpeedtestIntervalMinutes)*time.Minute)
+	if cfg.SpeedtestIntervalMinutes > 0 {
+		handler.StartMonitoringScheduler(monitoringCtx, time.Duration(cfg.SpeedtestIntervalMinutes)*time.Minute)
+	} else {
+		logger.Info("monitoring scheduler disabled", "speedtest_interval_minutes", cfg.SpeedtestIntervalMinutes)
+	}
 	// Shutdown 一调用 ListenAndServe 就立即返回 ErrServerClosed；主函数必须
 	// 等 Shutdown 把在途请求排空后再退出，否则 10 秒排空窗口形同虚设。
 	shutdownDone := make(chan struct{})
@@ -230,11 +239,12 @@ func main() {
 	trafficCancel()
 	monitoringCancel()
 	collectorCancel()
-	// 优雅停止执行器与采集器并限时等待在途写回完成，避免进程退出打断正在落盘的任务结果。
+	// 优雅停止执行器、采集器与告警对账协程并限时等待在途写回完成，避免进程退出打断正在落盘的任务结果。
 	executorCancel()
 	drainDone := make(chan struct{})
 	go func() {
 		defer close(drainDone)
+		<-alertDone
 		taskExecutor.Wait()
 		if metricsCollector != nil {
 			metricsCollector.Wait()

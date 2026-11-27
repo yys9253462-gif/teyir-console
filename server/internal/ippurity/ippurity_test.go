@@ -2,13 +2,16 @@ package ippurity
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"unicode/utf8"
 )
 
 // fakeProvider 用于覆盖 API 分支，避免测试真的出网。
@@ -399,3 +402,103 @@ func TestSafeClientAndIsPublicIPRejectSpecialUseRanges(t *testing.T) {
 		}
 	}
 }
+
+// 验证 parseAbuserScore 正确解析科学计数法（如 1.2e-4 / 5E-5），避免被截断成整数误报 100 分高危。
+func TestParseAbuserScoreScientificNotation(t *testing.T) {
+	cases := []struct {
+		raw   string
+		wantF float64
+	}{
+		{`"1.2e-4 (Very Low)"`, 0.00012},
+		{`"5E-5 (Low)"`, 0.00005},
+		{`2.5e-2`, 0.025},
+	}
+	for _, tc := range cases {
+		f, ok := parseAbuserScore(json.RawMessage(tc.raw))
+		if !ok || f < tc.wantF-1e-9 || f > tc.wantF+1e-9 {
+			t.Errorf("parseAbuserScore(%s) = (%v, %v)，期望 (%v, true)", tc.raw, f, ok, tc.wantF)
+		}
+	}
+	var raw ipapiIsResponse
+	if err := json.Unmarshal([]byte(`{"ip":"1.1.1.1","asn":{"asn":13335,"abuser_score":"1.2e-4 (Very Low)"}}`), &raw); err != nil {
+		t.Fatal(err)
+	}
+	v := normalizeIPAPIIs("1.1.1.1", raw)
+	if v.FraudScore == nil || *v.FraudScore != 0 {
+		t.Fatalf("1.2e-4 应折算为 0 分，不得误判高危，实际: %v", v.FraudScore)
+	}
+}
+
+// 验证非 200 响应体回显 API 密钥时会被脱敏，截断错误保持合法 UTF-8，且安全客户端启用 TLS 1.2。
+func TestIPAPIIsErrorBodyRedactsKeyAndSafeClientTLS(t *testing.T) {
+	secret := "FAKE-KEY-ECHO-TEST-999"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream error for https://api.ipapi.is/?q=1.1.1.1&key=" + secret + " " + strings.Repeat("网关异常", 40)))
+	}))
+	defer srv.Close()
+
+	p := IPAPIIs{APIKey: secret, BaseURL: srv.URL}
+	_, err := p.Lookup(context.Background(), srv.Client(), "1.1.1.1")
+	if err == nil {
+		t.Fatal("502 必须报错")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("非 200 响应体回显的密钥未脱敏: %v", err)
+	}
+	if !utf8.ValidString(err.Error()) {
+		t.Fatalf("截断后的错误文本含非法 UTF-8 字节: %q", err.Error())
+	}
+	if !utf8.ValidString(truncateForError(strings.Repeat("中文超长错误输入", 20))) {
+		t.Fatal("truncateForError 截断中文后产生非法 UTF-8")
+	}
+	tr, ok := safeClient.Transport.(*http.Transport)
+	if !ok || tr.TLSClientConfig == nil || tr.TLSClientConfig.MinVersion < tls.VersionTLS12 {
+		t.Fatalf("ippurity safeClient 必须强制最低 TLS 1.2，实际 %+v", tr)
+	}
+}
+
+// 验证并发合并 IPQS 评分时克隆 Verdict.Raw，不原地篡改离线库共享映射，避免并发 map 写入崩溃。
+func TestResolverConcurrentIPQSMergeDoesNotMutateSharedRaw(t *testing.T) {
+	sharedRaw := map[string]any{"origin": "offline"}
+	db := &stubDB{verdict: &Verdict{
+		ConnectionType: "datacenter",
+		FraudScore:     IntPtr(10),
+		DualISP:        BoolPtr(false),
+		Raw:            sharedRaw,
+	}}
+	score := &concurrentScoreProvider{verdict: &Verdict{
+		FraudScore: IntPtr(25),
+		Raw:        map[string]any{"score": 25},
+	}}
+	r := NewResolver(Options{DB: db, Score: score})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v, err := r.Lookup(context.Background(), "8.8.8.8", false)
+			if err != nil {
+				t.Errorf("并发 Lookup 失败: %v", err)
+				return
+			}
+			if v.Raw["ipqs"] == nil || v.Raw["origin"] != "offline" {
+				t.Errorf("合并后 Raw 缺字段: %+v", v.Raw)
+			}
+		}()
+	}
+	wg.Wait()
+	if _, polluted := sharedRaw["ipqs"]; polluted {
+		t.Fatalf("并发合并污染了离线库共享 Raw 映射: %+v", sharedRaw)
+	}
+}
+
+type concurrentScoreProvider struct {
+	verdict *Verdict
+}
+
+func (p *concurrentScoreProvider) Lookup(_ context.Context, _ *http.Client, _ string) (*Verdict, error) {
+	return p.verdict, nil
+}
+func (p *concurrentScoreProvider) Name() string { return "concurrent-fake" }

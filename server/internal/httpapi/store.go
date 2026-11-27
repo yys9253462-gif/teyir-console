@@ -769,18 +769,15 @@ func (s *Server) enforceSubscriptionAccess(ctx context.Context, rec *subscriptio
 		s.logger.Warn("subscription: record ip hit failed", "error", err)
 		return true, ""
 	}
-	if verdict == "ip_limit" {
-		return false, "ip_limit"
+	if verdict != "" {
+		return false, verdict
 	}
 	return true, ""
 }
 
-// recordSubscriptionHit atomically decides the quota and writes the ledger.
-//
-// The window filter and the "have I seen this address" test both happen in SQL
-// against a locked row, so the answer cannot go stale between deciding and
-// writing. Returns the refusal reason, or "" when the pull is allowed and the
-// address has been recorded.
+// recordSubscriptionHit 在行锁内原子复核订阅状态、网络上限并写入活跃 IP 账本。
+// 严格按「已删(not_found) → 已过期(expired) → 已停用(disabled) → 超网络上限(ip_limit) → 放行更新」分离返回，
+// 避免并发停用、过期或删除被误报为网络数达上限。
 func (s *Server) recordSubscriptionHit(ctx context.Context, rec *subscriptionRecord, ip string, now time.Time) (string, error) {
 	cutoff := now.Add(-subscriptionIPWindow)
 	ip = strings.TrimSpace(ip)
@@ -788,55 +785,76 @@ func (s *Server) recordSubscriptionHit(ctx context.Context, rec *subscriptionRec
 		ip = parsed.String()
 	}
 
-	// 使用行锁内的权威 ip_limit、enabled、deleted_at 判断，避免并发改限额或停用后沿用旧快照。
+	// 使用行锁内的权威 deleted_at、expires_at、enabled、ip_limit 判断，避免并发改限额、到期或停用后沿用旧快照。
 	const q = `
 WITH target AS (
-    SELECT id, ip_limit, active_ips
+    SELECT id, deleted_at, enabled, expires_at, ip_limit, COALESCE(active_ips, '[]'::jsonb) AS active_ips
     FROM subscription_tokens
-    WHERE id = $1::uuid AND deleted_at IS NULL AND enabled = TRUE
+    WHERE id = $1::uuid
     FOR UPDATE
 ),
 live AS (
     SELECT COALESCE(jsonb_agg(e), '[]'::jsonb) AS entries
     FROM target t,
          LATERAL jsonb_array_elements(t.active_ips) e
-    WHERE (e->>'seen_at')::timestamptz >= $2::timestamptz
+    WHERE t.deleted_at IS NULL
+      AND (t.expires_at IS NULL OR t.expires_at > $4::timestamptz)
+      AND t.enabled = TRUE
+      AND (e->>'seen_at')::timestamptz >= $2::timestamptz
       AND e->>'ip' <> $3
 ),
 known AS (
     SELECT EXISTS (
         SELECT 1 FROM target t, LATERAL jsonb_array_elements(t.active_ips) e
-        WHERE (e->>'seen_at')::timestamptz >= $2::timestamptz
+        WHERE t.deleted_at IS NULL
+          AND (t.expires_at IS NULL OR t.expires_at > $4::timestamptz)
+          AND t.enabled = TRUE
+          AND (e->>'seen_at')::timestamptz >= $2::timestamptz
           AND e->>'ip' = $3
     ) AS seen
 ),
 decided AS (
     SELECT t.id,
+           t.deleted_at,
+           t.enabled,
+           t.expires_at,
            t.ip_limit,
            (SELECT seen FROM known) AS seen,
            jsonb_array_length((SELECT entries FROM live)) AS live_count,
            (SELECT entries FROM live) AS live_entries
     FROM target t
+),
+updated AS (
+    UPDATE subscription_tokens st
+    SET active_ips = (
+            jsonb_build_array(jsonb_build_object('ip', $3::text, 'seen_at', $4::timestamptz))
+            || d.live_entries
+        )
+    FROM decided d
+    WHERE st.id = d.id
+      AND d.deleted_at IS NULL
+      AND (d.expires_at IS NULL OR d.expires_at > $4::timestamptz)
+      AND d.enabled = TRUE
+      AND (d.ip_limit = 0 OR d.seen OR d.live_count < d.ip_limit)
+    RETURNING st.id
 )
-UPDATE subscription_tokens st
-SET active_ips = (
-        jsonb_build_array(jsonb_build_object('ip', $3::text, 'seen_at', $4::timestamptz))
-        || (SELECT live_entries FROM decided)
-    )
-FROM decided d
-WHERE st.id = d.id
-  AND (d.ip_limit = 0 OR d.seen OR d.live_count < d.ip_limit)
-RETURNING 1`
+SELECT CASE
+    WHEN EXISTS (SELECT 1 FROM updated) THEN ''
+    WHEN d.deleted_at IS NOT NULL THEN 'not_found'
+    WHEN d.expires_at IS NOT NULL AND d.expires_at <= $4::timestamptz THEN 'expired'
+    WHEN NOT d.enabled THEN 'disabled'
+    ELSE 'ip_limit'
+END
+FROM decided d`
 
-	var dummy int
-	err := s.db.QueryRow(ctx, q, rec.ID, cutoff, ip, now).Scan(&dummy)
+	var verdict string
+	err := s.db.QueryRow(ctx, q, rec.ID, cutoff, ip, now).Scan(&verdict)
 	if err == nil {
-		return "", nil
+		return verdict, nil
 	}
-	// No row updated means the WHERE guard refused it: the quota is exhausted and
-	// this is a new address.
+	// 行已物理不存在：返回 not_found（由调用方按 404 拒绝，绝不误报为 ip_limit）。
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "ip_limit", nil
+		return "not_found", nil
 	}
 	return "", err
 }
@@ -3162,6 +3180,14 @@ func (s *Server) revokeNodeFromBuyerSubscriptions(ctx context.Context, nodeID st
 // 且没有按节点直接圈定」的订阅上的账号（节点被移出分类时用）。
 func (s *Server) revokeNodeFromSubscriptions(ctx context.Context, nodeID string, override *portalTarget, onlyCategories []string, buyersOnly bool) revokeOutcome {
 	outcome := revokeOutcome{}
+	// 统一将节点标识规范为小写标准格式：订阅表 node_accounts 字段以小写标识为键，
+	// 若直接拿大写路径参数匹配 JSONB 键会命中零行，导致节点下架或删除时买家账号漏回收。
+	if norm, ok := canonicalUUID(nodeID); ok {
+		nodeID = norm
+	} else {
+		outcome.Err = errors.New("节点标识格式无效")
+		return outcome
+	}
 	rows, err := s.db.Query(ctx, `
 		SELECT id, node_accounts
 		FROM subscription_tokens

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -84,32 +85,45 @@ type ipapiIsResponse struct {
 
 // parseAbuserScore 把 ipapi.is 的 abuser_score 折成 0.0-1.0 的浮点。
 // 上游两种形态都出现过：
-//   - 纯数字：   0.0023
-//   - 带单位串： "0.0023 (Low)" / "12 (High)" / "0.5"
+//   - 纯数字：   0.0023 / 5e-5
+//   - 带单位串： "0.0023 (Low)" / "1.2e-4 (Very Low)" / "12 (High)" / "0.5"
 //
-// 取串首的数字部分解析；解析不出返回 (0,false)，调用方据此保留 nil 不硬猜。
+// 取串首的数字部分（含合法科学计数法指数）解析；解析不出或非有限数返回 (0,false)，调用方据此保留 nil 不硬猜。
 func parseAbuserScore(raw json.RawMessage) (float64, bool) {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
 		return 0, false
 	}
-	// 去掉 JSON 字符串引号
-	s = strings.Trim(s, `"`)
-	// 取开头连续的数字/小数点/负号
+	// 去掉 JSON 字符串引号及外层空白
+	s = strings.TrimSpace(strings.Trim(s, `"`))
+	// 取开头连续的数字/小数点/正负号，并在后接有效指数（如 e-4 / E+2）时纳入科学计数法段。
 	end := 0
 	for end < len(s) {
 		c := s[end]
-		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' {
+		if (c >= '0' && c <= '9') || c == '.' || (end == 0 && (c == '-' || c == '+')) {
 			end++
 			continue
 		}
 		break
 	}
+	if end > 0 && end < len(s) && (s[end] == 'e' || s[end] == 'E') {
+		expPos := end + 1
+		if expPos < len(s) && (s[expPos] == '+' || s[expPos] == '-') {
+			expPos++
+		}
+		digitStart := expPos
+		for expPos < len(s) && s[expPos] >= '0' && s[expPos] <= '9' {
+			expPos++
+		}
+		if expPos > digitStart {
+			end = expPos
+		}
+	}
 	if end == 0 {
 		return 0, false
 	}
 	f, err := strconv.ParseFloat(s[:end], 64)
-	if err != nil {
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
 		return 0, false
 	}
 	return f, true
@@ -117,6 +131,9 @@ func parseAbuserScore(raw json.RawMessage) (float64, bool) {
 
 // Lookup 查询一个 IP。返回 nil（不是错误）表示上游没有该 IP 的数据。
 func (p IPAPIIs) Lookup(ctx context.Context, client *http.Client, ip string) (*Verdict, error) {
+	if client == nil {
+		client = safeClient
+	}
 	key := strings.TrimSpace(p.Keys.Get(KeyIPAPIIs))
 	if key == "" {
 		key = strings.TrimSpace(p.APIKey)
@@ -154,9 +171,16 @@ func (p IPAPIIs) Lookup(ctx context.Context, client *http.Client, ip string) (*V
 		return nil, fmt.Errorf("ipapi.is 鉴权失败（%d），请检查 IP_PURITY_API_KEY", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		// 读一点 body 便于排障，但别把整个响应灌进错误信息。
+		// 读一点 body 便于排障，但脱敏隐藏可能被上游网关回显的 API 密钥并清洗非法 UTF-8 字节。
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("ipapi.is 返回 %d: %s", resp.StatusCode, strings.TrimSpace(string(snippet)))
+		safeSnippet := strings.ToValidUTF8(strings.TrimSpace(string(snippet)), "")
+		if key != "" {
+			safeSnippet = strings.ReplaceAll(safeSnippet, key, "[REDACTED]")
+			if escaped := url.QueryEscape(key); escaped != key {
+				safeSnippet = strings.ReplaceAll(safeSnippet, escaped, "[REDACTED]")
+			}
+		}
+		return nil, fmt.Errorf("ipapi.is 返回 %d: %s", resp.StatusCode, safeSnippet)
 	}
 
 	var parsed ipapiIsResponse

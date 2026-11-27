@@ -32,6 +32,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"nodeops/server/internal/portaltls"
 	"strings"
 	"time"
@@ -162,15 +163,46 @@ type portalSpeedResponse struct {
 // "这台节点的 portal 还没升级" 而不是笼统的"测速失败"。
 var errPortalNoSpeedtest = errors.New("节点 portal 尚未提供测速端点（需升级 portal）")
 
+// speedtestEndpointFromBaseURL 将节点库中多种合法形态的 api_url 统一归一为 .../api/v1/speedtest，
+// 兼容裸源站、尾斜杠、/<token>、/api/v1、/api/v1/node/meta、/api/v1/speedtest 等输入，
+// 避免直接拼接出 /api/v1/node/meta/api/v1/speedtest 导致 404 误报门户未升级。
+func speedtestEndpointFromBaseURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return "", errors.New("节点未绑定 portal API")
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return "", fmt.Errorf("节点 API 地址无法解析: %w", err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return "", errors.New("节点 API 地址必须是 http/https")
+	}
+	if parsed.Host == "" {
+		return "", errors.New("节点 API 地址缺少主机名")
+	}
+	path := strings.TrimRight(parsed.Path, "/")
+	for _, suffix := range []string{"/api/v1/speedtest", "/api/v1/node/meta", "/api/v1/users/list", "/api/v1"} {
+		if strings.HasSuffix(path, suffix) {
+			path = strings.TrimRight(strings.TrimSuffix(path, suffix), "/")
+			break
+		}
+	}
+	return parsed.Scheme + "://" + parsed.Host + path + "/api/v1/speedtest", nil
+}
+
 // RunOnPortal 通过节点门户的 API 在**节点本机**跑一轮测速。
 //
 // 返回的结果与 SSH 通道同构（[]Result），调用方可以直接落库。
 // 采不到时返回 errPortalNoSpeedtest 或具体错误，绝不返回"空结果但看起来成功"。
 func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string) ([]Result, error) {
-	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	apiKey = strings.TrimSpace(apiKey)
-	if baseURL == "" || apiKey == "" {
+	if strings.TrimSpace(baseURL) == "" || apiKey == "" {
 		return nil, errors.New("节点未绑定 portal API")
+	}
+	endpoint, err := speedtestEndpointFromBaseURL(baseURL)
+	if err != nil {
+		return nil, err
 	}
 
 	// 节点侧端点最长要跑 18 个靶点 × 6 秒 ≈ 108 秒。
@@ -183,7 +215,7 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, baseURL+"/api/v1/speedtest", nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -192,6 +224,11 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 	client, err := portaltls.Client(portalClient, req.URL.String())
 	if err != nil {
 		return nil, err
+	}
+	// 命中 TLS 证书指纹时 portaltls.Client 会克隆一次性 Transport；先注册关闭空闲连接，
+	// 使其在 resp.Body.Close() 后彻底清理连接与可能存在的 HTTP/2 读循环协程。
+	if client != portalClient {
+		defer client.CloseIdleConnections()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -206,9 +243,13 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 		return nil, fmt.Errorf("节点 portal 鉴权失败（HTTP %d），请检查节点 API 密钥", resp.StatusCode)
 	}
 
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	const maxPortalSpeedtestResponse = 256 << 10
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxPortalSpeedtestResponse+1))
 	if err != nil {
 		return nil, errors.New("读取节点响应失败")
+	}
+	if len(raw) > maxPortalSpeedtestResponse {
+		return nil, errors.New("节点 portal 响应过大（超过 256 KiB），已拒绝解析")
 	}
 
 	var parsed portalSpeedResponse
@@ -246,18 +287,32 @@ func (p *Prober) RunOnPortal(ctx context.Context, nodeID, baseURL, apiKey string
 			// 也不要写进库里（前端按 carrier 分组，脏值会让整组凭空消失）。
 			continue
 		}
+		avg := clampPtrPtr(r.ICMPAvgMs, 0, 60000)
+		loss := clampPtrPtr(r.ICMPLossPct, 0, 100)
+		// 与 SSH 通道 ParseProbeOutput 保持同口径：缺失丢包率、或未 100% 丢包却缺失延迟的靶点记为无效统计，
+		// 绝不把空统计标成 ProbeOK=true 写库污染可用性判断。
+		probeOK := true
+		probeErr := ""
+		if loss == nil || (*loss < 100 && avg == nil) {
+			probeOK = false
+			probeErr = "靶点未返回有效统计"
+		}
 		results = append(results, Result{
 			TargetKey:   r.TargetKey,
 			Name:        r.TargetName,
 			Host:        r.TargetHost,
 			Carrier:     r.Carrier,
-			ICMPAvgMs:   clampPtrPtr(r.ICMPAvgMs, 0, 60000),
-			ICMPLossPct: clampPtrPtr(r.ICMPLossPct, 0, 100),
-			ProbeOK:     true,
+			ICMPAvgMs:   avg,
+			ICMPLossPct: loss,
+			ProbeOK:     probeOK,
+			ProbeError:  probeErr,
 		})
 	}
 	if len(results) == 0 {
 		return nil, errors.New("节点 portal 返回的靶点全部无法识别")
+	}
+	if err := usableProbeResults(results); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

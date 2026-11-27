@@ -202,6 +202,22 @@ esac
         self.assertEqual(code, 0, output)
         self.assertIn("http://[::1]:8088/api/health", output)
 
+    def test_rejects_option_injection_ref_and_supports_export_env(self):
+        code_bad, out_bad = self.run_fixture("existing", ["--all"])
+        self.assertEqual(code_bad, 1, out_bad)
+        self.assertIn("非法分支参数", out_bad)
+        self.assertNotIn("FETCHED", out_bad)
+
+        env_text = 'export API_BIND="0.0.0.0" # 对外\nexport API_PORT=\'19191\' # 端口\n'
+        curl_stub = (
+            "#!/usr/bin/env bash\n"
+            "printf 'CURL_ARGS=%s\\n' \"$*\" >&2\n"
+            "printf '200'\n"
+        )
+        code_ok, out_ok = self.run_fixture("full", env_text=env_text, curl_script=curl_stub)
+        self.assertEqual(code_ok, 0, out_ok)
+        self.assertIn("http://127.0.0.1:19191/api/health", out_ok)
+
 
 if __name__ == "__main__":
     unittest.main()

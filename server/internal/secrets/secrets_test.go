@@ -65,3 +65,33 @@ func TestBoxSealOpenAndTamperRejection(t *testing.T) {
 		t.Fatal("过短密文必须被拒绝")
 	}
 }
+
+// 验证首尾空白密钥可安全初始化，且空接收者或零值 Box 不会空指针崩溃。
+func TestBoxTrimsKeyAndGuardsNilReceiver(t *testing.T) {
+	box, err := NewBox("  " + testKey32() + "\n")
+	if err != nil {
+		t.Fatalf("带首尾空白的合法密钥应能初始化: %v", err)
+	}
+	ct, err := box.Seal([]byte("payload"))
+	if err != nil {
+		t.Fatalf("加密失败: %v", err)
+	}
+	if pt, err := box.Open(ct); err != nil || string(pt) != "payload" {
+		t.Fatalf("解密异常: pt=%q err=%v", pt, err)
+	}
+
+	var nilBox *Box
+	if _, err := nilBox.Seal([]byte("x")); err == nil {
+		t.Fatal("nil Box 加密必须返回错误")
+	}
+	if _, err := nilBox.Open(ct); err == nil {
+		t.Fatal("nil Box 解密必须返回错误")
+	}
+	zeroBox := &Box{}
+	if _, err := zeroBox.Seal([]byte("x")); err == nil {
+		t.Fatal("未初始化零值 Box 加密必须返回错误")
+	}
+	if _, err := zeroBox.Open(ct); err == nil {
+		t.Fatal("未初始化零值 Box 解密必须返回错误")
+	}
+}

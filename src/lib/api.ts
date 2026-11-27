@@ -1156,10 +1156,18 @@ export function isAdminSession(): boolean {
   return loadSession()?.role === "admin"
 }
 
-// portalActionAdminOnly 与后端 portalActionAdminOnly 同一条规则（2026-11-03 起后端对非管理员回 403）：
-// 危险动词、install_*、出口管理只限管理员。前端据此把按钮禁用并说明原因，而不是点了才报错。
-export function portalActionAdminOnly(verb: string, dangerous?: boolean): boolean {
-  return Boolean(dangerous) || verb.startsWith('install_') || verb === 'manage_outbounds'
+// portalActionAdminOnly 与后端 portalActionAdminOnly（server/internal/httpapi/portalaction.go）保持同一条规则：
+// 危险动词、install_*、出口管理、代理管理以及除只读/增删节点客户端外的 AmneziaWG 操作只限管理员。
+export function portalActionAdminOnly(verb: string, dangerous?: boolean, params?: Record<string, string>): boolean {
+  const cleanVerb = verb.trim()
+  if (Boolean(dangerous) || cleanVerb.startsWith('install_') || cleanVerb === 'manage_outbounds' || cleanVerb === 'manage_proxy') {
+    return true
+  }
+  if (cleanVerb === 'manage_awg') {
+    const action = (params?.action ?? '').trim()
+    return action !== '' && action !== 'state' && action !== 'peer_add' && action !== 'peer_del'
+  }
+  return false
 }
 export const ADMIN_ONLY_HINT = '仅管理员可操作（会在节点上以 root 执行脚本）'
 
@@ -1258,8 +1266,40 @@ function normalizeHeaders(headers: HeadersInit | undefined, body: BodyInit | nul
   return merged
 }
 
-function handleUnauthorized(path: string, status: number) {
-  if (status !== 401 || NON_SESSION_401_PATHS.has(path.split('?')[0]) || !loadSession()) return
+// 与后端 viewerMayUseRequest（server/internal/httpapi/server.go）保持一致的只读角色前置校验。
+export function viewerMayUseRequest(method: string, path: string): boolean {
+  const upper = method.toUpperCase()
+  const cleanPath = path.split('?')[0]
+  if (upper === 'POST' && cleanPath === '/api/auth/change-password') return true
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(upper)) return false
+  // 历史 GET /api/nodes/{id}/api 会刷新并写回节点元数据，属于写副作用请求。
+  if ((upper === 'GET' || upper === 'HEAD') && cleanPath.startsWith('/api/nodes/') && cleanPath.endsWith('/api')) {
+    return false
+  }
+  return true
+}
+
+function parseJsonText<T>(text: string): T {
+  try {
+    return JSON.parse(text) as T
+  } catch {
+    throw new Error('服务端返回格式异常（非预期 JSON），请检查反向代理或后端服务状态')
+  }
+}
+
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const text = await response.text()
+  if (!text.trim()) {
+    throw new Error('服务端返回空响应，请检查反向代理或后端服务状态')
+  }
+  return parseJsonText<T>(text)
+}
+
+function handleUnauthorized(path: string, status: number, sentToken: string) {
+  if (status !== 401 || NON_SESSION_401_PATHS.has(path.split('?')[0])) return
+  const current = loadSession()
+  // 仅当 401 对应的请求令牌仍是当前生效会话令牌时才清理，防止旧会话迟到的 401 误踢刚重新登录的新会话。
+  if (!current || (sentToken && current.token !== sentToken)) return
   terminalAuthEpoch++
   clearSession()
   void queueTerminalCookie(clearTerminalCookie).catch(() => undefined)
@@ -1268,14 +1308,16 @@ function handleUnauthorized(path: string, status: number) {
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || 'GET').toUpperCase()
-  if (loadSession()?.role === 'viewer' && !['GET', 'HEAD', 'OPTIONS'].includes(method) && path !== '/api/auth/change-password') {
+  const session = loadSession()
+  if (session?.role === 'viewer' && !viewerMayUseRequest(method, path)) {
     throw Object.assign(new Error('只读账号不能执行写操作'), { status: 403 })
   }
+  const sentToken = session?.token ?? ''
   const base = API_BASE.endsWith('/') ? API_BASE.slice(0, -1) : API_BASE
   const headers = normalizeHeaders(init?.headers, init?.body)
   const response = await fetchWithTimeout(`${base}${path}`, { ...init, headers })
   if (!response.ok) {
-    handleUnauthorized(path, response.status)
+    handleUnauthorized(path, response.status, sentToken)
     const error = new Error(`请求失败 (${response.status})`) as ApiError
     error.status = response.status
     try {
@@ -1295,16 +1337,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const text = await response.text()
   if (!text) return undefined as T
-  return JSON.parse(text) as T
+  return parseJsonText<T>(text)
 }
 
 // Subscription previews are returned as text in whichever format was asked for,
 // so they bypass the JSON decoder.
 async function requestText(path: string): Promise<string> {
+  const sentToken = loadSession()?.token ?? ''
   const base = API_BASE.endsWith('/') ? API_BASE.slice(0, -1) : API_BASE
   const response = await fetchWithTimeout(`${base}${path}`, { headers: authHeaders() })
   if (!response.ok) {
-    handleUnauthorized(path, response.status)
+    handleUnauthorized(path, response.status, sentToken)
     const error = new Error(`请求失败 (${response.status})`) as ApiError
     error.status = response.status
     // 2026-11-06：与 request() 一样带上后端的错误原文。原来只有「请求失败 (429)」，
@@ -1349,9 +1392,16 @@ function queueTerminalCookie<T>(operation: () => Promise<T>): Promise<T> {
   return result
 }
 
+const TERMINAL_COOKIE_CLEAR_TIMEOUT_MS = 10_000
+
 async function clearTerminalCookie(): Promise<void> {
   const base = API_BASE.replace(/\/$/, '')
-  const response = await fetch(`${base}/api/auth/terminal-session`, { method: 'DELETE', credentials: 'include', keepalive: true })
+  // 必须带超时上限，避免断网或反代挂起时永久阻塞串行队列 terminalCookieQueue，导致重登录后无法建立终端会话。
+  const response = await fetchWithTimeout(
+    `${base}/api/auth/terminal-session`,
+    { method: 'DELETE', credentials: 'include', keepalive: true },
+    TERMINAL_COOKIE_CLEAR_TIMEOUT_MS,
+  )
   if (!response.ok) throw new Error(`清理终端认证失败 (${response.status})`)
 }
 
@@ -1384,7 +1434,7 @@ export const api = {
     const base = API_BASE.endsWith('/') ? API_BASE.slice(0, -1) : API_BASE
     const response = await fetchWithTimeout(`${base}/api/login/config`, { cache: 'no-store' }, PUBLIC_REQUEST_TIMEOUT_MS)
     if (!response.ok) throw new Error(`登录配置加载失败 (${response.status})`)
-    return response.json()
+    return parseJsonResponse<{ turnstile_site_key: string }>(response)
   },
   login: async (email: string, password: string, turnstileToken = ''): Promise<Session> => {
     const base = API_BASE.endsWith('/') ? API_BASE.slice(0, -1) : API_BASE
@@ -1400,7 +1450,10 @@ export const api = {
       error.status = response.status
       throw error
     }
-    const body = (await response.json()) as { token: string; email: string; role: string }
+    const body = await parseJsonResponse<{ token: string; email: string; role: string }>(response)
+    if (!body?.token || typeof body.token !== 'string') {
+      throw new Error('登录响应缺少有效令牌，请检查后端服务状态')
+    }
     const session: Session = { token: body.token, email: body.email, role: body.role }
     saveSession(session)
     return session
@@ -1706,7 +1759,7 @@ export const api = {
       error.status = response.status
       throw error
     }
-    return response.json() as Promise<DeliveryView>
+    return parseJsonResponse<DeliveryView>(response)
   },
   serverMetrics: (id: string) => request<MetricSample[]>(`/api/servers/${seg(id)}/metrics`),
   // One call returns the 24h sparkline series for every host at once. The

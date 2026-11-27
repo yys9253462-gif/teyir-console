@@ -190,3 +190,19 @@ func TestRunRespectsContextWhenNewSessionHangs(t *testing.T) {
 		t.Fatalf("超时返回耗时过长: %v", time.Since(start))
 	}
 }
+
+// 验证 Dial 拒绝空用户名，且在上下文已取消时不会返回悬空连接。
+func TestDialRejectsEmptyUserAndRespectsCanceledContext(t *testing.T) {
+	cred := Credential{Type: "password", Secret: []byte("fake-test-pass")}
+	if _, _, err := Dial(context.Background(), "127.0.0.1", 22, "   ", cred, ""); err == nil {
+		t.Fatal("空用户名必须被拒绝")
+	}
+
+	host, port, real := startTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if client, _, err := Dial(ctx, host, port, "root", cred, real); err == nil {
+		client.Close()
+		t.Fatal("已取消上下文下 Dial 不得返回成功连接")
+	}
+}

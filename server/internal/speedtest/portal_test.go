@@ -371,3 +371,57 @@ func TestRunOnPortalHandlesTrailingSlashAndRejectsRedirectOrBadStatus(t *testing
 		})
 	}
 }
+
+// 验证 speedtestEndpointFromBaseURL 能正确归一多种 api_url 形态，避免带 /api/v1/node/meta 时拼出双前缀 404。
+func TestSpeedtestEndpointFromBaseURLNormalization(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://node.example.com:8443", "https://node.example.com:8443/api/v1/speedtest"},
+		{"https://node.example.com:8443/", "https://node.example.com:8443/api/v1/speedtest"},
+		{"https://node.example.com:8443/api/v1", "https://node.example.com:8443/api/v1/speedtest"},
+		{"https://node.example.com:8443/api/v1/node/meta", "https://node.example.com:8443/api/v1/speedtest"},
+		{"https://node.example.com:8443/api/v1/speedtest", "https://node.example.com:8443/api/v1/speedtest"},
+		{"https://node.example.com:8443/0123456789abcdef/api/v1/node/meta", "https://node.example.com:8443/0123456789abcdef/api/v1/speedtest"},
+		{"https://node.example.com:8443/0123456789abcdef", "https://node.example.com:8443/0123456789abcdef/api/v1/speedtest"},
+	}
+	for _, tc := range cases {
+		got, err := speedtestEndpointFromBaseURL(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("speedtestEndpointFromBaseURL(%q) = (%q, %v)，期望 %q", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"", "ftp://node.example.com", "https://", "://bad"} {
+		if got, err := speedtestEndpointFromBaseURL(bad); err == nil {
+			t.Errorf("非法地址 %q 应报错，实际返回 %q", bad, got)
+		}
+	}
+}
+
+// 验证 portal 测速拒绝缺失有效统计的靶点伪装成功，并明确拦截超过 256 KiB 的超大响应。
+func TestRunOnPortalRejectsIncompleteStatsAndOversizedBody(t *testing.T) {
+	oldDial := portalClient.Transport.(*http.Transport).DialContext
+	portalClient.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, addr)
+	}
+	defer func() { portalClient.Transport.(*http.Transport).DialContext = oldDial }()
+
+	p := newProberForTest()
+
+	incompleteSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"results":[{"target_key":"a","icmp_avg_ms":null,"icmp_loss_pct":null}]}`))
+	}))
+	defer incompleteSrv.Close()
+	if _, err := p.RunOnPortal(context.Background(), "n1", incompleteSrv.URL+"/api/v1/node/meta", "fake-key"); err == nil {
+		t.Fatal("全部靶点均缺失有效统计时不得返回成功")
+	}
+
+	oversizedSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"results":[{"target_key":"` + strings.Repeat("a", 300*1024) + `"}]}`))
+	}))
+	defer oversizedSrv.Close()
+	if _, err := p.RunOnPortal(context.Background(), "n1", oversizedSrv.URL, "fake-key"); err == nil || !strings.Contains(err.Error(), "过大") {
+		t.Fatalf("超过 256 KiB 的响应应明确报过大，实际: %v", err)
+	}
+}

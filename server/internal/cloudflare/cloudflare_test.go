@@ -268,3 +268,114 @@ func TestUpsertANormalizesAndCapsPagination(t *testing.T) {
 		t.Fatalf("ListZones 不应静默吞掉解析错误: %v", err)
 	}
 }
+
+// 验证多条同名 A 记录回退到后续已有目标 IP 时，直接保留并复用匹配记录、零 PATCH，
+// 彻底避免先把首条记录改写成重复 IP 触发 Cloudflare 81058 冲突报错。
+func TestUpsertARecordsReusesExistingMatchingRecordAvoiding81058(t *testing.T) {
+	type rec struct {
+		ID, Name, Content string
+		Proxied           bool
+	}
+	store := []rec{
+		{"a1", "hy2.example.com", "1.1.1.1", false},
+		{"a2", "hy2.example.com", "2.2.2.2", false},
+	}
+	patchCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ok := func(v any) { _ = json.NewEncoder(w).Encode(map[string]any{"success": true, "result": v}) }
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			ok([]map[string]string{{"id": "z1", "name": "example.com"}})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records"):
+			if r.URL.Query().Get("type") == "AAAA" {
+				ok([]any{})
+				return
+			}
+			out := make([]map[string]any, 0, len(store))
+			for _, x := range store {
+				out = append(out, map[string]any{"id": x.ID, "name": x.Name, "content": x.Content, "proxied": x.Proxied})
+			}
+			ok(out)
+		case r.Method == http.MethodPatch:
+			patchCount++
+			var body map[string]any
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			newIP, _ := body["content"].(string)
+			for _, x := range store {
+				if x.ID != id && x.Content == newIP {
+					w.WriteHeader(http.StatusBadRequest)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"success": false,
+						"errors":  []map[string]any{{"code": 81058, "message": "An identical record already exists."}},
+					})
+					return
+				}
+			}
+			for i := range store {
+				if store[i].ID == id {
+					store[i].Content = newIP
+					store[i].Proxied = false
+				}
+			}
+			ok(map[string]any{"id": id})
+		case r.Method == http.MethodDelete:
+			id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
+			for i := range store {
+				if store[i].ID == id {
+					store = append(store[:i], store[i+1:]...)
+					break
+				}
+			}
+			ok(map[string]any{"id": id})
+		}
+	}))
+	defer srv.Close()
+
+	c := &Client{Token: "tok", Base: srv.URL, HTTP: srv.Client()}
+	res, err := c.UpsertARecords(context.Background(), "hy2.example.com", "2.2.2.2")
+	if err != nil {
+		t.Fatalf("切回已有 A 记录 IP 不应触发 81058 冲突: %v", err)
+	}
+	if patchCount != 0 || res.Deleted != 1 || res.Action != "updated" {
+		t.Fatalf("应直接保留已有未代理记录并删除多余记录: patch=%d res=%+v", patchCount, res)
+	}
+	if len(store) != 1 || store[0].ID != "a2" || store[0].Content != "2.2.2.2" {
+		t.Fatalf("最终应只保留原 a2 记录，实际: %+v", store)
+	}
+}
+
+// 验证拒绝 3xx 重定向、拒绝非 2xx 伪成功响应，并拦截含连续点或空白的非法域名。
+func TestClientRejectsRedirectBadHTTPStatusAndMalformedDomain(t *testing.T) {
+	if defaultHTTPClient.CheckRedirect == nil || defaultHTTPClient.CheckRedirect(nil, nil) == nil {
+		t.Fatal("defaultHTTPClient 必须禁用重定向")
+	}
+	redirSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "http://127.0.0.1/evil")
+		w.WriteHeader(http.StatusFound)
+		_, _ = w.Write([]byte(`{"success":true,"result":[]}`))
+	}))
+	defer redirSrv.Close()
+	c := &Client{Token: "tok", Base: redirSrv.URL, HTTP: &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}}
+	if _, err := c.ListZones(context.Background()); err == nil || !strings.Contains(err.Error(), "重定向") {
+		t.Fatalf("3xx 重定向必须被拒绝，实际: %v", err)
+	}
+
+	fakeOKSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"success":true,"result":[]}`))
+	}))
+	defer fakeOKSrv.Close()
+	c2 := &Client{Token: "tok", Base: fakeOKSrv.URL, HTTP: fakeOKSrv.Client()}
+	if _, err := c2.ListZones(context.Background()); err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("非 2xx 伪成功响应必须报错，实际: %v", err)
+	}
+
+	for _, badDomain := range []string{"a..example.com", ".example.com", "a b.example.com"} {
+		if _, err := c2.UpsertARecords(context.Background(), badDomain, "1.2.3.4"); err == nil {
+			t.Errorf("非法域名 %q 必须被拒绝", badDomain)
+		}
+	}
+}

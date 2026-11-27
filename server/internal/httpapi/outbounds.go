@@ -103,7 +103,7 @@ func (s *Server) nodeOutbounds(w http.ResponseWriter, r *http.Request) {
 	}
 	list, err := fetchOutbounds(ctx, target)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": redactPortalError(err.Error(), target)})
 		return
 	}
 	out := outboundState{
@@ -160,6 +160,7 @@ func (s *Server) nodeOutboundProbe(w http.ResponseWriter, r *http.Request) {
 		s.writePortalWebTargetError(w, err)
 		return
 	}
+	var rawProxyURL string
 	query := url.Values{"kind": {"direct"}}
 	if name != "" && name != "direct" {
 		if name == "warp" || name == "warp_socks" {
@@ -167,7 +168,7 @@ func (s *Server) nodeOutboundProbe(w http.ResponseWriter, r *http.Request) {
 		} else {
 			list, err := fetchOutbounds(ctx, target)
 			if err != nil {
-				writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": redactPortalError(err.Error(), target)})
 				return
 			}
 			found := false
@@ -182,7 +183,8 @@ func (s *Server) nodeOutboundProbe(w http.ResponseWriter, r *http.Request) {
 					query.Set("addr", str(o, "addr"))
 				case "http":
 					query.Set("kind", "http")
-					query.Set("addr", str(o, "url"))
+					rawProxyURL = str(o, "url")
+					query.Set("addr", rawProxyURL)
 				default:
 					query.Set("kind", "direct")
 				}
@@ -195,7 +197,11 @@ func (s *Server) nodeOutboundProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	env, err := portalWebCall(ctx, target, http.MethodGet, "outbounds/probe", nil, query)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
+		msg := redactPortalError(err.Error(), target)
+		if rawProxyURL != "" {
+			msg = strings.ReplaceAll(msg, rawProxyURL, redactProxyURL(rawProxyURL))
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": msg})
 		return
 	}
 	var res struct {

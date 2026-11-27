@@ -226,10 +226,14 @@ func (s *Server) getPortalBatch(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return
 	}
-	id := r.PathValue("id")
-	if id != "latest" && !uuidPattern.MatchString(id) {
-		writeJSON(w, 400, map[string]string{"error": "任务 ID 不合法"})
-		return
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id != "latest" {
+		norm, ok := canonicalUUID(id)
+		if !ok {
+			writeJSON(w, 400, map[string]string{"error": "任务 ID 不合法"})
+			return
+		}
+		id = norm
 	}
 	s.expirePortalBatches(r.Context())
 	q := `SELECT id::text,created_by::text,status,results,expected,created_at,updated_at,cancel_requested FROM portal_update_batches WHERE id=$1::uuid AND (created_by=$2::uuid OR $3) LIMIT 1`
@@ -341,9 +345,13 @@ func (s *Server) runPortalBatch(b portalBatch) {
 			return
 		}
 		if stopped {
-			item.Status = "cancelled"
-			item.Stage = "未下发，已取消"
-			continue
+			for j := i; j < len(b.Results); j++ {
+				if b.Results[j].Status == "queued" {
+					b.Results[j].Status = "cancelled"
+					b.Results[j].Stage = "未下发，已取消"
+				}
+			}
+			break
 		}
 		item.Status = "running"
 		item.Stage = "第一轮：升级门户"
@@ -555,8 +563,8 @@ func (s *Server) cancelPortalBatch(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	id := r.PathValue("id")
-	if !uuidPattern.MatchString(id) {
+	id, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
 		writeJSON(w, 400, map[string]string{"error": "任务 ID 不合法"})
 		return
 	}

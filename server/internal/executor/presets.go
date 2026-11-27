@@ -135,7 +135,7 @@ if [ -z "$newest" ] || [ "$newest" = "$running" ]; then
   else echo "内核已是最新（$running），无需重启"; fi
   exit 0
 fi
-if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq '(teyir-console|hy2-ops-console)'; then
+if (command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -Eq '(teyir-console|hy2-ops-console)') || systemctl is-active --quiet teyir-console-api 2>/dev/null || systemctl is-active --quiet hy2-ops-console-api 2>/dev/null; then
   echo "这是面板所在主机：新内核 $newest 已安装但不自动重启，请择时手动 reboot"; exit 0
 fi
 # 正在运行、却没设开机自启的服务，重启后不会回来 —— 先列出来，便于事后核对。
@@ -188,9 +188,9 @@ echo "时区 $cur → Asia/Shanghai；当前时间 $(date '+%F %T %Z')"`,
 	"install_fail2ban": {
 		Label: "安装 fail2ban（SSH 防爆破）",
 		Script: `if systemctl is-active --quiet fail2ban 2>/dev/null; then echo "fail2ban 已在运行，无需变更"; fail2ban-client status sshd 2>/dev/null | tail -n 3; exit 0; fi
-if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get -y -q install fail2ban
-elif command -v dnf >/dev/null 2>&1; then dnf -y -q install epel-release; dnf -y -q install fail2ban
-elif command -v yum >/dev/null 2>&1; then yum -y -q install epel-release; yum -y -q install fail2ban
+if command -v apt-get >/dev/null 2>&1; then DEBIAN_FRONTEND=noninteractive apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get -y -q install fail2ban || { echo "安装 fail2ban 失败" >&2; exit 3; }
+elif command -v dnf >/dev/null 2>&1; then dnf -y -q install epel-release; dnf -y -q install fail2ban || { echo "安装 fail2ban 失败" >&2; exit 3; }
+elif command -v yum >/dev/null 2>&1; then yum -y -q install epel-release; yum -y -q install fail2ban || { echo "安装 fail2ban 失败" >&2; exit 3; }
 else echo "未识别的包管理器" >&2; exit 2; fi
 if [ ! -f /etc/fail2ban/jail.local ]; then
   printf '[sshd]\nenabled = true\nmaxretry = 5\nfindtime = 10m\nbantime = 1h\n' > /etc/fail2ban/jail.local
@@ -234,7 +234,7 @@ func (e *Executor) runPreset(ctx context.Context, t task) (string, []logLine, er
 	// 脚本经 base64 传给 bash 的 stdin，避免任何引号转义问题；
 	// 非 root 用 sudo -n，缺 sudoers 时立即失败而不是卡在密码提示。
 	sudo := "sudo -n "
-	if t.user == "root" {
+	if strings.TrimSpace(t.user) == "root" {
 		sudo = ""
 	}
 	encoded := base64.StdEncoding.EncodeToString([]byte("set -o pipefail\n" + preset.Script + "\n"))

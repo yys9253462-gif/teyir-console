@@ -58,61 +58,77 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
   const current = PRESETS.find((p) => p.key === preset)!
   const eligible = servers.filter((s) => !blockedReason(s, current.readOnly))
   const taskIds = Object.values(created)
-  const pending = taskIds.some((id) => !tasks[id] || ['queued', 'running'].includes(tasks[id].status))
+  const taskIdsKey = taskIds.join(',')
+  const [pollStopped, setPollStopped] = useState(false)
+  const pending = !pollStopped && taskIds.some((id) => !tasks[id] || ['queued', 'running'].includes(tasks[id].status))
 
-  // 串行定时轮询本次创建的任务：首轮立即拉取、前一次未完成不重叠、标签页隐藏时暂停并在切回前台立刻补一次。
-  // 连续失败 3 次即停止并提示原因，避免界面永远卡在「执行中」。
+  // 串行定时轮询本次创建的任务：首轮立即拉取、前一次未完成不重叠、标签页隐藏时停止定时并在切回前台立即恢复。
+  // 连续请求失败 3 次或任务 ID 连续 3 次在返回中缺失时自动停止，避免界面永久卡在「执行中」。
   useEffect(() => {
     if (!taskIds.length || !pending) return
     let alive = true
     let fails = 0
+    let missingRounds = 0
     let timer: number | undefined
 
     const poll = async () => {
-      if (!alive) return
-      if (document.hidden) {
-        timer = window.setTimeout(() => { void poll() }, 3000)
-        return
-      }
+      if (!alive || document.hidden) return
       try {
         const list = await api.tasks(taskIds)
         if (!alive) return
         fails = 0
-        setPollError('')
-        setTasks(Object.fromEntries(list.filter((t) => taskIds.includes(t.id)).map((t) => [t.id, t])))
-        timer = window.setTimeout(() => { void poll() }, 3000)
+        const found = list.filter((t) => taskIds.includes(t.id))
+        const foundMap = Object.fromEntries(found.map((t) => [t.id, t]))
+        setTasks(foundMap)
+        const hasMissing = taskIds.some((id) => !foundMap[id])
+        const anyActive = found.some((t) => ['queued', 'running'].includes(t.status))
+        if (hasMissing && !anyActive) {
+          missingRounds += 1
+          if (missingRounds >= 3) {
+            setPollStopped(true)
+            setPollError('部分任务记录未在列表中返回（可能已清理或超出保留上限），已停止自动刷新，请到「运维任务」页核查最终结果')
+            return
+          }
+        } else {
+          missingRounds = 0
+          setPollError('')
+        }
+        if (alive && (anyActive || hasMissing) && !document.hidden) {
+          timer = window.setTimeout(() => { void poll() }, 3000)
+        }
       } catch (err) {
         if (!alive) return
         fails++
         if (fails >= 3) {
+          setPollStopped(true)
           setPollError(err instanceof Error ? `进度查询失败：${err.message}（已停止刷新，结果请到「运维任务」页查看）` : '进度查询连续失败，已停止刷新')
           return
         }
-        timer = window.setTimeout(() => { void poll() }, 3000)
+        if (!document.hidden) timer = window.setTimeout(() => { void poll() }, 3000)
       }
     }
 
     const onVisible = () => {
-      if (!document.hidden && alive && fails < 3) {
+      if (!document.hidden && alive && fails < 3 && missingRounds < 3) {
         window.clearTimeout(timer)
         void poll()
       }
     }
     document.addEventListener('visibilitychange', onVisible)
-    void poll()
+    if (!document.hidden) void poll()
     return () => {
       alive = false
       window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [taskIds.join(','), pending])
+  }, [taskIdsKey, pending])
 
   async function start() {
     if (readOnly || !admin || submitting || !selected.length) return
     if (!await askConfirm(`确认对 ${selected.length} 台主机执行「${current.label}」？\n\n${current.hint}`)) return
     if (current.danger && window.prompt(`这是不可逆操作。输入「卸载」确认对 ${selected.length} 台主机执行：`) !== '卸载') return
     setSubmitting(true)
-    setCreated({}); setCreateErrors({}); setTasks({})
+    setCreated({}); setCreateErrors({}); setTasks({}); setPollError(''); setPollStopped(false)
     const ok: Record<string, string> = {}
     const bad: Record<string, string> = {}
     for (const id of selected) {
@@ -138,7 +154,7 @@ export function BatchHostPresets({ servers, onClose, notify, initialPreset }: {
       <p style={{ marginBottom: 10 }}>对多台主机执行固定的系统维护脚本。每项都可安全重复执行；任务在后台运行，关闭窗口不影响，完整日志在「运维任务」页。</p>
 
       <div className="monitor-filter" role="group" aria-label="预设" style={{ display: 'inline-flex', flexWrap: 'wrap', marginBottom: 8 }}>
-        {PRESETS.map((p) => <button key={p.key} className={preset === p.key ? 'active' : ''} disabled={submitting || pending} onClick={() => { setPreset(p.key); setSelected([]); setCreated({}); setTasks({}); setCreateErrors({}); setPollError('') }}>{p.label}</button>)}
+        {PRESETS.map((p) => <button key={p.key} className={preset === p.key ? 'active' : ''} disabled={submitting || pending} onClick={() => { setPreset(p.key); setSelected([]); setCreated({}); setTasks({}); setCreateErrors({}); setPollError(''); setPollStopped(false) }}>{p.label}</button>)}
       </div>
       <p className="form-note" style={{ marginBottom: 10 }}>{current.hint}</p>
 

@@ -317,8 +317,10 @@ func TestProbeStatusLimitsResponseSize(t *testing.T) {
 		done <- probeStatusViaAPIWithDial(context.Background(), server.URL, "key", 5*time.Second, testDial())
 	}()
 	select {
-	case <-done:
-		// 正常返回即通过（截断后解析失败是预期的）
+	case res := <-done:
+		if res.OK || res.ErrorKind != "invalid" || !strings.Contains(res.Detail, "过大") {
+			t.Fatalf("超大响应应明确返回 invalid 与过大提示，实际: %+v", res)
+		}
 	case <-time.After(8 * time.Second):
 		t.Fatal("大响应处理超时")
 	}

@@ -16,6 +16,7 @@ export function Modal({ title, kicker, children, onClose, wide }: { title: strin
 
   useEffect(() => {
     const id = Symbol('modal')
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
     if (modalStack.length === 0) {
       savedBodyOverflow = document.body.style.overflow
       document.body.style.overflow = 'hidden'
@@ -37,6 +38,9 @@ export function Modal({ title, kicker, children, onClose, wide }: { title: strin
       if (modalStack.length === 0 && savedBodyOverflow !== null) {
         document.body.style.overflow = savedBodyOverflow
         savedBodyOverflow = null
+      }
+      if (previousFocus && previousFocus.isConnected && modalStack.length === 0) {
+        previousFocus.focus()
       }
     }
   }, [])

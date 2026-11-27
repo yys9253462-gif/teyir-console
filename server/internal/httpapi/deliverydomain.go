@@ -334,9 +334,9 @@ func (s *Server) setDeliveryDomain(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if updateName {
-		// 先落库再更新缓存：写失败时绝不刷新内存缓存，防止重启后回退。
+		// 先落库再更新缓存：写失败时绝不刷新内存缓存，防止重启后回退；数据库原文仅写日志不回传前端。
 		if err := s.putSetting(r.Context(), subscriptionNameKey, trimmedName, "客户端导入后的订阅分组名称（留空则使用默认名称）"); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存订阅名称失败：" + err.Error()})
+			s.databaseError(w, r, err)
 			return
 		}
 		subscriptionNameCache.Store(trimmedName)
@@ -346,9 +346,9 @@ func (s *Server) setDeliveryDomain(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// 同上：写失败必须让操作者知道，否则"改了域名"只在内存里生效到下次重启。
+	// 同上：写失败必须让操作者知道，且不向浏览器暴露底层数据库错误细节。
 	if err := s.putSetting(r.Context(), deliveryBaseKey, base, "发给买家的订阅/交付链接域名（空 = 用环境变量或面板域名）"); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "保存交付域名失败：" + err.Error()})
+		s.databaseError(w, r, err)
 		return
 	}
 	deliveryBaseCache.Store(base)

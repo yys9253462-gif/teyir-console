@@ -219,7 +219,25 @@ function App() {
 
   // 前一条提示的定时器不清掉，会把紧跟着出现的新提示提前收掉；组件卸载时一并清理。
   const toastTimer = useRef<number | undefined>(undefined)
-  useEffect(() => () => window.clearTimeout(toastTimer.current), [])
+  const searchFocusTimer = useRef<number | undefined>(undefined)
+  useEffect(() => () => {
+    window.clearTimeout(toastTimer.current)
+    window.clearTimeout(searchFocusTimer.current)
+  }, [])
+
+  const closeServerDrawer = useCallback(() => {
+    setSelected(null)
+    setRotatingCred(false)
+    setKeyInput('')
+  }, [])
+
+  const openQuickSearch = useCallback(() => {
+    setSearchText('')
+    setSearchCursor(0)
+    setSearchOpen(true)
+    window.clearTimeout(searchFocusTimer.current)
+    searchFocusTimer.current = window.setTimeout(() => document.getElementById('server-search')?.focus(), 0)
+  }, [])
 
   const showToast = useCallback((message: string, tone?: 'info' | 'error') => {
     setToast(message)
@@ -282,10 +300,13 @@ function App() {
         setSession(null)
       }
     } finally {
-      refreshInFlight.current = false
-      if (refreshRerun.current && epoch === sessionEpoch.current) {
-        refreshRerun.current = false
-        void refresh()
+      // 仅当本次刷新仍属于当前会话代数时才释放飞行锁，避免登出重登录后旧请求提前解锁导致并发重复请求。
+      if (epoch === sessionEpoch.current) {
+        refreshInFlight.current = false
+        if (refreshRerun.current) {
+          refreshRerun.current = false
+          void refresh()
+        }
       }
     }
   }, [resetWorkspaceData])
@@ -339,10 +360,7 @@ function App() {
     function onKey(event: KeyboardEvent) {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        setSearchText('')
-        setSearchCursor(0)
-        setSearchOpen(true)
-        window.setTimeout(() => document.getElementById('server-search')?.focus(), 0)
+        openQuickSearch()
         return
       }
       if (
@@ -359,12 +377,12 @@ function App() {
         // 焦点位于交互式 SSH 终端内时，将 Esc 键保留给远端程序（如 vim / less），禁止直接关掉抽屉断开终端。
         if (event.target instanceof Element && event.target.closest('.host-terminal, .xterm')) return
         event.preventDefault()
-        setSelected(null)
+        closeServerDrawer()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [session, selected, searchOpen, pendingHostDelete, pendingCredDelete, appearanceOpen, helpOpen])
+  }, [session, selected, searchOpen, pendingHostDelete, pendingCredDelete, appearanceOpen, helpOpen, openQuickSearch, closeServerDrawer])
 
   useEffect(() => {
     if (!selected) return
@@ -542,7 +560,8 @@ function App() {
       case '节点监控':
         return <NodeMonitoringPage notify={showToast} />
       case 'IP 纯净度':
-        return <IPPurityPage notify={showToast} readOnly={session.role !== 'admin'} />
+        // 后端允许运维账号执行单节点纯净度与流媒体解锁刷新，仅全量批量与指定 IP 探测限管理员；这里只对只读账号置 readOnly。
+        return <IPPurityPage notify={showToast} readOnly={isViewer} />
       case 'VPS 主机':
         return <ServersPage servers={servers} nodes={nodes} createSignal={hostCreateSignal} onOpen={setSelected} onChanged={refresh} notify={showToast} />
       case 'HY2 节点':
@@ -611,12 +630,7 @@ function App() {
               className="icon-button search-trigger"
               aria-label="快捷搜索主机与页面"
               title="快捷搜索（Ctrl/⌘ + K）"
-              onClick={() => {
-                setSearchText('')
-                setSearchCursor(0)
-                setSearchOpen(true)
-                window.setTimeout(() => document.getElementById('server-search')?.focus(), 0)
-              }}
+              onClick={openQuickSearch}
             >
               <Search size={17} />
             </button>
@@ -661,14 +675,14 @@ function App() {
 
       {sidebarOpen && <button className="mobile-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} />}
       {selected && (
-        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setSelected(null)}>
+        <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && closeServerDrawer()}>
           <section className="detail-drawer host-detail-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
             <div className="drawer-head">
               <div>
                 <div className="section-kicker">主机详情 <span>·</span> {selected.id.slice(0, 8).toUpperCase()}</div>
                 <h2 id="drawer-title">{selected.name}</h2>
               </div>
-              <button className="icon-button" aria-label="关闭详情" onClick={() => setSelected(null)}><X size={18} /></button>
+              <button className="icon-button" aria-label="关闭详情" onClick={closeServerDrawer}><X size={18} /></button>
             </div>
             <div className="drawer-status">
               <span className={`status-badge ${serverStatusClass[selected.status]}`}><i />{serverStatusText[selected.status]}</span>

@@ -1,16 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 // Plus 与 ServerIcon 已随「登记节点」入口和「所属主机」列一起移除（2026-10-02）。
 import { Activity, AlertTriangle, Download, Layers, Gauge, Link2, Network, Pencil, RefreshCw, SlidersHorizontal, Tag, Trash2, Unplug } from 'lucide-react'
 import { api, loadSession, type Hy2Node, type NodeCapabilities, type NodeCategory, type PortalPreview, type Server, isAdminSession } from '../lib/api'
 import { formatBytes } from '../lib/format'
 import { Modal } from './Modal'
 import { askConfirm } from './ConfirmHost'
-import { CategoryManager } from './CategoryManager'
-import { NodeControlPanel } from './NodeControlPanel'
 import { IPPurityBadge } from './IPPurityBadge'
-import { SubscriptionPanel } from './SubscriptionPanel'
-import { PortalBatchUpdate } from './PortalBatchUpdate'
-import { BatchNodeOps } from './BatchNodeOps'
+import { ViewLoadingFallback } from './ErrorBoundary'
+
+// 重型弹窗组件按需分包加载，大幅压低「HY2 节点」列表首屏包体。
+const CategoryManager = lazy(() => import('./CategoryManager').then((m) => ({ default: m.CategoryManager })))
+const NodeControlPanel = lazy(() => import('./NodeControlPanel').then((m) => ({ default: m.NodeControlPanel })))
+const SubscriptionPanel = lazy(() => import('./SubscriptionPanel').then((m) => ({ default: m.SubscriptionPanel })))
+const PortalBatchUpdate = lazy(() => import('./PortalBatchUpdate').then((m) => ({ default: m.PortalBatchUpdate })))
+const BatchNodeOps = lazy(() => import('./BatchNodeOps').then((m) => ({ default: m.BatchNodeOps })))
 
 const nodeStatusText: Record<Hy2Node['status'], string> = { online: '在线', warning: '不稳定', offline: '离线', unknown: '未知' }
 const nodeStatusClass: Record<Hy2Node['status'], string> = { online: 'online', warning: 'warning', offline: 'offline', unknown: 'offline' }
@@ -452,8 +455,16 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
         <button className="button button-primary" disabled={readOnly || !isAdminSession()} title={readOnly ? "只读账号不能接入节点" : !isAdminSession() ? "仅管理员可接入节点（绑定会保存节点凭据）" : undefined} onClick={() => setImporting(true)}><Download size={16} />接入节点</button>
       </div></div>
 
-      {batchOps && <BatchNodeOps nodes={nodes} notify={notify} onClose={() => setBatchOps(false)} />}
-      {batchUpdating && <PortalBatchUpdate nodes={nodes} notify={notify} onClose={() => setBatchUpdating(false)} />}
+      {batchOps && (
+        <Suspense fallback={<div className="modal-backdrop"><div className="modal-card"><ViewLoadingFallback label="正在加载批量运维…" /></div></div>}>
+          <BatchNodeOps nodes={nodes} notify={notify} onClose={() => setBatchOps(false)} />
+        </Suspense>
+      )}
+      {batchUpdating && (
+        <Suspense fallback={<div className="modal-backdrop"><div className="modal-card"><ViewLoadingFallback label="正在加载批量更新门户…" /></div></div>}>
+          <PortalBatchUpdate nodes={nodes} notify={notify} onClose={() => setBatchUpdating(false)} />
+        </Suspense>
+      )}
 
       <section className="metrics-grid" aria-label="节点指标">
         <MetricCard label="节点总数" value={nodes.length.toString()} unit="个" icon={<Network size={17} />} tone="green" foot={<span>已登记的 HY2 节点</span>} />
@@ -634,11 +645,13 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
       )}
 
       {managingTags && (
-        <CategoryManager
-          notify={notify}
-          onClose={() => setManagingTags(false)}
-          onChanged={() => { void loadCategories(); void onChanged() }}
-        />
+        <Suspense fallback={<div className="modal-backdrop"><div className="modal-card"><ViewLoadingFallback label="正在加载分类管理…" /></div></div>}>
+          <CategoryManager
+            notify={notify}
+            onClose={() => setManagingTags(false)}
+            onChanged={() => { void loadCategories(); void onChanged() }}
+          />
+        </Suspense>
       )}
 
       {editing && (
@@ -653,13 +666,17 @@ export function NodesPage({ nodes, servers, onChanged, notify }: {
       {activeControlling && (
         <Modal title={`节点控制 · ${activeControlling.name}`} kicker="NODE CONTROL" onClose={() => setControlling(null)} wide>
           {/* Modal 头部已经写了标题，面板再画一次就是同一句话重复两行。 */}
-          <NodeControlPanel node={activeControlling} notify={notify} showTitle={false} />
+          <Suspense fallback={<ViewLoadingFallback label="正在加载节点控制面板…" />}>
+            <NodeControlPanel node={activeControlling} notify={notify} showTitle={false} />
+          </Suspense>
         </Modal>
       )}
 
       {subscribing && (
         <Modal title="合并订阅" kicker="MERGED SUBSCRIPTION" onClose={() => setSubscribing(false)} wide>
-          <SubscriptionPanel notify={notify} />
+          <Suspense fallback={<ViewLoadingFallback label="正在加载合并订阅…" />}>
+            <SubscriptionPanel notify={notify} />
+          </Suspense>
         </Modal>
       )}
     </>

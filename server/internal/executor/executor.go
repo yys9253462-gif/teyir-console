@@ -29,6 +29,13 @@ type Executor struct {
 	// 这里给并发设上限，避免慢任务堆积时每个 tick 都再开一批。
 	inflight atomic.Int32
 	wg       sync.WaitGroup
+	// 与 collector 对齐的循环生命周期同步：保证 Wait 先等 Run 循环彻底退出，
+	// 彻底消除停机时 claimAndRun 刚提交事务尚未 wg.Add(1) 就被 Wait 抢跑放行关闭连接池的竞态。
+	runMu      sync.Mutex
+	activeRuns int
+	runDone    chan struct{}
+	// runBody 仅用于包内单测注入可控循环体，生产路径保持 nil。
+	runBody func(context.Context)
 }
 
 // maxInflightTasks 与单批上限配合，确保全进程在途执行任务总数严格不超过上限。
@@ -41,8 +48,45 @@ func New(logger *slog.Logger, db *pgxpool.Pool, intervalSeconds int, box *secret
 	return &Executor{logger: logger, db: db, interval: time.Duration(intervalSeconds) * time.Second, box: box}
 }
 
-// Wait 等待全部在途任务完成收尾与状态写回，供进程优雅退出时调用。
+func (e *Executor) beginRun() {
+	e.runMu.Lock()
+	if e.activeRuns == 0 {
+		e.runDone = make(chan struct{})
+	}
+	e.activeRuns++
+	e.runMu.Unlock()
+}
+
+func (e *Executor) endRun() {
+	e.runMu.Lock()
+	e.activeRuns--
+	if e.activeRuns == 0 && e.runDone != nil {
+		close(e.runDone)
+		e.runDone = nil
+	}
+	e.runMu.Unlock()
+}
+
+// Start 在当前协程同步登记生命周期后派生后台执行循环，避免启停瞬间与 Wait 竞态。
+func (e *Executor) Start(ctx context.Context) {
+	e.beginRun()
+	go func() {
+		defer e.endRun()
+		e.Run(ctx)
+	}()
+}
+
+// Wait 先等待执行器调度循环彻底停止（不再领取新任务），再等待全部在途任务完成收尾与状态写回。
 func (e *Executor) Wait() {
+	for {
+		e.runMu.Lock()
+		done := e.runDone
+		e.runMu.Unlock()
+		if done == nil {
+			break
+		}
+		<-done
+	}
 	e.wg.Wait()
 }
 
@@ -72,6 +116,12 @@ type logLine struct {
 var safeUnit = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._-]{0,63}$`)
 
 func (e *Executor) Run(ctx context.Context) {
+	e.beginRun()
+	defer e.endRun()
+	if e.runBody != nil {
+		e.runBody(ctx)
+		return
+	}
 	e.reapStaleRunning(ctx)
 	ticker := time.NewTicker(e.interval)
 	defer ticker.Stop()
@@ -288,6 +338,7 @@ func (e *Executor) writeTaskResult(t task, status, summary, errorCode string, lo
 	defer cancelWriteback()
 
 	// 先批量写入日志再落终态，消除前端看到终态却读到空日志的竞态，同时减少往返次数。
+	// 日志写入带短退避重试（ON CONFLICT DO NOTHING 保证完全幂等），避免数据库瞬断导致终态成功而日志永久空白。
 	if len(logs) > 0 {
 		seqs := make([]int, len(logs))
 		levels := make([]string, len(logs))
@@ -297,12 +348,24 @@ func (e *Executor) writeTaskResult(t task, status, summary, errorCode string, lo
 			levels[i] = entry.level
 			msgs[i] = entry.message
 		}
-		if _, dbErr := e.db.Exec(writebackCtx, `
+		for attempt := 0; attempt < 3; attempt++ {
+			_, dbErr := e.db.Exec(writebackCtx, `
 INSERT INTO task_logs (task_id, sequence, level, message)
 SELECT $1, u.seq, u.lvl, u.msg
 FROM unnest($2::int[], $3::text[], $4::text[]) AS u(seq, lvl, msg)
-ON CONFLICT DO NOTHING`, t.id, seqs, levels, msgs); dbErr != nil {
-			e.logger.Warn("executor: write logs batch failed", "task_id", t.id, "count", len(logs), "error", dbErr)
+ON CONFLICT DO NOTHING`, t.id, seqs, levels, msgs)
+			if dbErr == nil {
+				break
+			}
+			e.logger.Warn("executor: write logs batch failed", "task_id", t.id, "attempt", attempt+1, "count", len(logs), "error", dbErr)
+			if attempt == 2 {
+				break
+			}
+			select {
+			case <-writebackCtx.Done():
+				attempt = 3
+			case <-time.After(time.Duration(attempt+1) * time.Second):
+			}
 		}
 	}
 
@@ -589,7 +652,7 @@ func (e *Executor) controlService(ctx context.Context, t task, action serviceAct
 	// Use non-interactive sudo when not already root, so a missing sudoers rule
 	// fails fast with a clear exit code instead of hanging on a password prompt.
 	prefix := "sudo -n "
-	if t.user == "root" {
+	if strings.TrimSpace(t.user) == "root" {
 		prefix = ""
 	}
 	command := serviceCommand(prefix, unit, action)

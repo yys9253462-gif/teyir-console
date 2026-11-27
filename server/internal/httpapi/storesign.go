@@ -190,6 +190,12 @@ func (s *Server) storeSignatureRequired(r *http.Request) (bool, error) {
 
 // GET /api/settings/store-signature
 func (s *Server) getStoreSignature(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		claims, _ := claimsFrom(r.Context())
+		if !s.enforceReadLimit(w, claims.Subject) {
+			return
+		}
+	}
 	required, err := s.storeSignatureRequired(r)
 	if err != nil {
 		s.databaseError(w, r, err)

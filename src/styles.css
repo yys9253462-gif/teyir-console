@@ -3075,7 +3075,12 @@ input[type="radio"] {
   .heading-actions .button-quiet { width: auto; padding: 0 10px; font-size: 12.5px; gap: 5px; }
   .page-footer button { display: inline-flex; }
   .delivery-card { padding: 20px 16px; border-radius: 16px; }
+  .delivery-head { flex-wrap: wrap; align-items: flex-start; gap: 8px; }
   .login-card { padding: 28px 22px; border-radius: 16px; }
+}
+@media (pointer: coarse), (max-width: 700px) {
+  .row-more { min-width: 38px; min-height: 38px; }
+  .pager-btn { min-width: 36px; min-height: 36px; }
 }
 
 /* 13. 异常边界、按需加载占位与全局快捷搜索弹层 */
@@ -3231,4 +3236,15 @@ input[type="radio"] {
   align-items: center;
   gap: 8px;
   margin: 8px 0;
+}
+.renew-captcha-wrap {
+  display: grid;
+  gap: 8px;
+}
+.renew-captcha-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }

@@ -30,6 +30,10 @@ func Dial(ctx context.Context, host string, port int, user string, cred Credenti
 	if host == "" {
 		return nil, "", errors.New("ssh: empty host")
 	}
+	user = strings.TrimSpace(user)
+	if user == "" {
+		return nil, "", errors.New("ssh: empty user")
+	}
 	if port < 1 || port > 65535 {
 		return nil, "", fmt.Errorf("ssh: invalid port %d", port)
 	}
@@ -88,9 +92,18 @@ func Dial(ctx context.Context, host string, port int, user string, cred Credenti
 		return nil, "", err
 	}
 	// 上下文取消时立即压低连接截止时间，打断阻塞中的 SSH 握手而非苦等 10 秒超时。
-	stopCancel := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	// 当 stopCancel() 返回 false 说明回调已被调度，必须等待其结束再清除或关闭连接，
+	// 彻底消除 SetDeadline(time.Time{}) 与取消回调之间的并发时序竞态。
+	cancelDone := make(chan struct{})
+	stopCancel := context.AfterFunc(ctx, func() {
+		defer close(cancelDone)
+		_ = conn.SetDeadline(time.Now())
+	})
 	sshConn, chans, reqs, err := ssh.NewClientConn(conn, conn.RemoteAddr().String(), config)
-	stopCancel()
+	canceled := !stopCancel()
+	if canceled {
+		<-cancelDone
+	}
 	fpMu.Lock()
 	observed := got
 	fpMu.Unlock()
@@ -102,6 +115,10 @@ func Dial(ctx context.Context, host string, port int, user string, cred Credenti
 			return nil, observed, &HostKeyMismatchError{Expected: strings.TrimSpace(pinned), Got: observed}
 		}
 		return nil, observed, err
+	}
+	if canceled {
+		_ = sshConn.Close()
+		return nil, observed, ctx.Err()
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return ssh.NewClient(sshConn, chans, reqs), observed, nil

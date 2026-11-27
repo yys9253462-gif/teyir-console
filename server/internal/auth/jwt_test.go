@@ -65,3 +65,30 @@ func TestSignerRejectsUnsupportedHeaderEvenWithValidMAC(t *testing.T) {
 		t.Fatal("非允许算法头部即使签名匹配也必须被拒绝")
 	}
 }
+
+// 验证空接收者、未设时钟的零值 Signer 与非正 TTL 均安全返回错误且不触发空指针崩溃。
+func TestSignerNilAndNonPositiveTTLRejected(t *testing.T) {
+	var nilSigner *Signer
+	if nilSigner.TTL() != 0 {
+		t.Fatal("空 Signer 的 TTL 应为 0")
+	}
+	if _, err := nilSigner.Issue("u1", "a@example.invalid", "admin"); err == nil {
+		t.Fatal("空 Signer 签发必须报错")
+	}
+	if _, err := nilSigner.Verify("a.b.c"); err == nil {
+		t.Fatal("空 Signer 验签必须报错")
+	}
+	badTTL := NewSigner("test-only-signing-secret-0123456789", 0)
+	if _, err := badTTL.Issue("u1", "a@example.invalid", "admin"); err == nil {
+		t.Fatal("非正 TTL 签发必须报错")
+	}
+	// 手工构造未初始化 now 函数的 Signer 也应回退系统时钟而不崩溃。
+	manual := &Signer{secret: []byte("test-only-signing-secret-0123456789"), ttl: time.Minute}
+	tok, err := manual.Issue("u1", "a@example.invalid", "admin")
+	if err != nil {
+		t.Fatalf("未显式设 now 的 Signer 应回退系统时钟签发: %v", err)
+	}
+	if _, err := manual.Verify(tok); err != nil {
+		t.Fatalf("未显式设 now 的 Signer 应正常验签: %v", err)
+	}
+}

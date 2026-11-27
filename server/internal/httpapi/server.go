@@ -549,6 +549,7 @@ func (s *Server) authenticated(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		if claims.Role == "viewer" && s.viewerRestrictSubscriptions && subscriptionCredentialPath(r.URL.Path) {
+			s.auditDenied(r.WithContext(context.WithValue(r.Context(), claimsKey, claims)), "forbidden_viewer_subscription_credential")
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "当前部署未授权只读角色访问订阅凭证"})
 			return
 		}
@@ -796,6 +797,10 @@ func (l *slidingLimiter) allowWithRetry(subject string) (bool, time.Duration) {
 		}
 	}
 	if len(kept) >= l.limit {
+		if len(kept) == 0 {
+			delete(l.attempts, subject)
+			return false, l.window
+		}
 		l.attempts[subject] = kept
 		// kept 的顺序即写入顺序，也就是时间顺序，kept[0] 最老。
 		return false, kept[0].Sub(cutoff)
@@ -1193,9 +1198,13 @@ func (s *Server) createServer(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid server payload"})
 		return
 	}
-	// 地址里不能有空白：它会被拼进 SSH 拨号与命令，空白只会让采集器反复失败。
-	if strings.ContainsAny(input.Host, " \t\r\n/") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机地址只能是 IP 或域名，不能含空格或路径"})
+	// 地址与 SSH 用户名不能包含空白或控制字符：会被拼进 SSH 拨号与远端命令，畸形输入会导致采集循环失败。
+	if strings.ContainsAny(input.Host, " \t\r\n/") || controlChars.MatchString(input.Host) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "主机地址只能是 IP 或域名，不能含空格、控制字符或路径"})
+		return
+	}
+	if strings.ContainsAny(input.SSHUser, " \t\r\n") || controlChars.MatchString(input.SSHUser) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "SSH 用户名不能包含空白或控制字符"})
 		return
 	}
 	if input.Tags == nil {
@@ -1538,6 +1547,10 @@ func (s *Server) uploadCredential(w http.ResponseWriter, r *http.Request) {
 	// AWS/Ubuntu 镜像拒绝 root 登录，于是每 30 秒失败一次，正是上面说的被 fail2ban 封掉。
 	// 现在：给了 username 就用；没给时只在当前是占位符（api-only）或为空时才填 root，其余保留。
 	sshUser := strings.TrimSpace(input.Username)
+	if sshUser != "" && (strings.ContainsAny(sshUser, " \t\r\n") || controlChars.MatchString(sshUser)) {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "SSH 用户名不能包含空白或控制字符"})
+		return
+	}
 	if _, err := s.db.Exec(r.Context(), `UPDATE servers
 SET ssh_user = CASE WHEN $1 <> '' THEN $1
                     WHEN COALESCE(ssh_user, '') IN ('', 'api-only') THEN 'root'
@@ -1637,6 +1650,7 @@ func (s *Server) taskLogs(w http.ResponseWriter, r *http.Request) {
 	// uninstall_hy2 打出安装细节），不给只读账号。运维需要它排障，所以只挡 viewer。
 	claims, ok := claimsFrom(r.Context())
 	if ok && claims.Role == "viewer" {
+		s.auditDenied(r, "forbidden_viewer_task_logs")
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "任务日志含主机内部信息，只读账号不可查看；需要时请让管理员或运维账号打开"})
 		return
 	}

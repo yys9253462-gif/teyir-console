@@ -593,8 +593,9 @@ WHERE t.id = ANY($1::uuid[])`, ids)
 	// 发送失败（超长被拒、网络抖动）后这周的结果再也发不出来。
 	// 未绑定机器人时 telegramNotify 返回 false，仍要清空，否则每小时都重算一遍。
 	if msg := strings.TrimSpace(b.String()); msg != "" {
-		if !s.telegramNotify("⏰ 每周安全检查\n"+msg) && s.telegramChatID(ctx) != "" {
-			return // 下个钟头重试
+		// 仅当机器人聊天编号与令牌均已配置时保留待办以供后续重试，避免未配令牌时每分钟空转查询。
+		if !s.telegramNotify("⏰ 每周安全检查\n"+msg) && s.telegramChatID(ctx) != "" && s.telegramToken() != "" {
+			return // 下次调度重试
 		}
 	}
 	if err := s.putSetting(ctx, "schedule_audit_tasks", "[]", "定时安全检查待汇总的任务"); err != nil {

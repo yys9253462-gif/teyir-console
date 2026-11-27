@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
-
-	"nodeops/server/internal/ippurity"
 )
 
 // 面板登录安全（2026-10-16）：
@@ -218,10 +217,15 @@ func (s *Server) sendTelegramLong(ctx context.Context, chat, text string) error 
 
 func (s *Server) telegramNotifyWithBanAsync(text, ip string) {
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil && s.logger != nil {
+				s.logger.Error("telegram notify with ban panic", "panic", rec, "stack", string(debug.Stack()))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		chat := s.telegramChatID(ctx)
-		token := s.purityKeys.Get(ippurity.KeyTelegram)
+		token := s.telegramToken()
 		if chat == "" || token == "" {
 			return
 		}
@@ -229,23 +233,27 @@ func (s *Server) telegramNotifyWithBanAsync(text, ip string) {
 			"chat_id":                  chat,
 			"text":                     text,
 			"disable_web_page_preview": true,
-			"reply_markup": map[string]any{
+		}
+		if net.ParseIP(strings.TrimSpace(ip)) != nil {
+			payload["reply_markup"] = map[string]any{
 				"inline_keyboard": [][]map[string]string{{{
 					"text":          "🚫 立即永久封禁此IP (" + ip + ")",
 					"callback_data": "tg:banip:" + ip,
 				}}},
-			},
+			}
 		}
-		if err := telegramCall(ctx, token, "sendMessage", payload, nil); err != nil {
+		if err := telegramCall(ctx, token, "sendMessage", payload, nil); err != nil && s.logger != nil {
 			s.logger.Warn("telegram notify failed", "error", err)
 		}
 	}()
 }
 
 func (s *Server) onLoginFailure(ip, email string) {
-	// 2026-11-06：受信任的反代地址不计入封禁。反代没带 X-Forwarded-For 时 requestClientIP 回的是
-	// 反代自己（如 172.19.0.x）：所有人的登录失败都记在这一个地址上，凑满 5 次就把全体用户锁在外面，
-	// Telegram 告警里还会给出一个「永久封禁」该地址的按钮。记一条警告，让人去查反代配置。
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return
+	}
+	// 受信任的反代地址不计入封禁，防止代理链未透传客户端地址时误封全体用户。
 	if s.isTrustedProxyAddress(ip) {
 		if s.logger != nil {
 			s.logger.Warn("login: failure attributed to a trusted proxy address; not banning (check X-Forwarded-For on the reverse proxy)", "ip", ip)
@@ -253,7 +261,9 @@ func (s *Server) onLoginFailure(ip, email string) {
 		return
 	}
 	if loginGuardState.fail(loginKey(ip), time.Now()) {
-		s.logger.Warn("login: ip banned after repeated failures", "ip", ip, "key", loginKey(ip))
+		if s.logger != nil {
+			s.logger.Warn("login: ip banned after repeated failures", "ip", ip, "key", loginKey(ip))
+		}
 		s.telegramNotifyWithBanAsync(fmt.Sprintf("🚫 面板登录：%s 在 %d 分钟内连续失败 %d 次，已封禁 %d 分钟。最后尝试的账号：%s",
 			ip, int(loginFailWindow.Minutes()), loginFailMax, int(loginBanFor.Minutes()), firstNonEmpty(email, "（空）")), ip)
 	}

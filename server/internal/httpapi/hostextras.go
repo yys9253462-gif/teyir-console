@@ -23,6 +23,9 @@ import (
 //   - 资源趋势（7 天按小时取均值）
 
 func (s *Server) cloudflareClient() *cloudflare.Client {
+	if s == nil || s.purityKeys == nil {
+		return &cloudflare.Client{}
+	}
 	return &cloudflare.Client{Token: s.purityKeys.Get(ippurity.KeyCloudflare)}
 }
 
@@ -61,7 +64,11 @@ func (s *Server) testServerSSH(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	serverID := r.PathValue("id")
+	serverID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在"})
+		return
+	}
 	var host, user, pin, kind string
 	var port int
 	var encrypted []byte
@@ -220,7 +227,11 @@ func (s *Server) putServerBilling(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	in.Note = truncateRunes(strings.TrimSpace(in.Note), 200)
-	serverID := r.PathValue("id")
+	serverID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在"})
+		return
+	}
 	tag, err := s.db.Exec(r.Context(), `
 INSERT INTO server_billing (server_id, expires_on, monthly_cost, currency, auto_renew, note, updated_at)
 SELECT s.id, $2::date, $3, $4, $5, $6, now() FROM servers s WHERE s.id = $1::uuid AND s.deleted_at IS NULL
@@ -306,9 +317,10 @@ func (s *Server) changeServerIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "自动DNS同步当前仅支持IPv4；IPv6请取消DNS同步并手工配置AAAA记录"})
 		return
 	}
-	serverID := r.PathValue("id")
-	if norm, ok := canonicalUUID(serverID); ok {
-		serverID = norm
+	serverID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在"})
+		return
 	}
 	if busy, err := s.serverHasActiveHostJob(r.Context(), serverID); err != nil {
 		s.databaseError(w, r, err)
@@ -476,6 +488,11 @@ func (s *Server) serverMetricsTrend(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return
 	}
+	serverID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "主机不存在"})
+		return
+	}
 	days := 7
 	if d := r.URL.Query().Get("days"); d == "1" || d == "3" || d == "7" || d == "30" {
 		fmt.Sscanf(d, "%d", &days)
@@ -487,7 +504,7 @@ SELECT date_trunc('hour', sampled_at) AS h,
        AVG(CASE WHEN disk_total_bytes > 0 THEN disk_used_bytes * 100.0 / disk_total_bytes END)::float8
 FROM server_metrics
 WHERE server_id = $1::uuid AND sampled_at > now() - make_interval(days => $2)
-GROUP BY h ORDER BY h`, r.PathValue("id"), days)
+GROUP BY h ORDER BY h`, serverID, days)
 	if err != nil {
 		s.databaseError(w, r, err)
 		return

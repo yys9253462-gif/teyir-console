@@ -172,7 +172,7 @@ func TestPortalStatusProbeCountMatchesTable(t *testing.T) {
 	// 端点清单与 probes 表一一对应，新增端点时这里也要加。
 	known := []string{
 		"check-version", "bbr-status", "reality-status", "vmess-status",
-		"vlessenc-status", "warp-status", "awg-state", "proxy-services", "traffic-speed",
+		"vlessenc-status", "anytls-status", "warp-status", "awg-state", "proxy-services", "traffic-speed",
 	}
 	if len(known) != portalStatusProbeCount {
 		t.Fatalf("portalStatusProbeCount = %d, 已知端点 %d 个", portalStatusProbeCount, len(known))

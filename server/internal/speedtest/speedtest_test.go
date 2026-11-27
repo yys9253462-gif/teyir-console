@@ -11,11 +11,13 @@ package speedtest
 // 恰好都是同一种 ping 实现时，另一种的解析分支就永远没人走）。
 
 import (
+	"context"
 	"math"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -364,6 +366,21 @@ func TestTruncate(t *testing.T) {
 	}
 	if got := truncate("ab", 5); got != "ab" {
 		t.Errorf("短字符串不该被截断: %q", got)
+	}
+	// 中文按 Unicode 字符截断且必须保持合法 UTF-8。
+	if got := truncate("东京节点探针输出异常", 4); got != "东京节点…" || !utf8.ValidString(got) {
+		t.Errorf("中文截断应保持完整字符与合法 UTF-8，实际: %q", got)
+	}
+}
+
+func TestDialOnlyRejectsInvalidHostOrPort(t *testing.T) {
+	if _, err := DialOnly(context.Background(), "   ", 22, time.Second); err == nil {
+		t.Fatal("空主机必须被拒绝")
+	}
+	for _, port := range []int{0, -1, 65536} {
+		if _, err := DialOnly(context.Background(), "127.0.0.1", port, time.Second); err == nil {
+			t.Fatalf("非法端口 %d 必须被拒绝", port)
+		}
 	}
 }
 

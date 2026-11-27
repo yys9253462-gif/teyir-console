@@ -3,7 +3,7 @@ import { Check, CheckCircle2, Copy, ExternalLink, Loader2 } from 'lucide-react'
 import { copyToClipboard } from '../lib/clipboard'
 import { useCopiedFlash } from '../lib/copiedFlash'
 import { loadTurnstile } from '../lib/turnstile'
-import { safeSameOriginPath } from '../lib/safeUrl'
+import { safeExternalHttpUrl, safeSameOriginPath } from '../lib/safeUrl'
 import { Modal } from './Modal'
 
 // RenewDialog —— 交付页内弹窗续费（2026-10-30）。
@@ -64,6 +64,8 @@ export function renewTargetFrom(renewURL: string | undefined | null): RenewTarge
 const STORE_REQUEST_TIMEOUT_MS = 30_000
 const STORE_UNAVAILABLE_MSG = '当前站点尚未配置在线自助续费接口，请通过外部商城页面续费或联系客服/管理员处理。'
 
+type StoreHttpError = Error & { status?: number }
+
 async function getJSON<T>(path: string, externalSignal?: AbortSignal): Promise<T> {
   const controller = new AbortController()
   let timedOut = false
@@ -81,15 +83,15 @@ async function getJSON<T>(path: string, externalSignal?: AbortSignal): Promise<T
     if (response.status === 404 || response.status === 502 || response.status === 503) {
       const body = isJSON ? await response.json().catch(() => ({})) : {}
       const backendErr = (body as { error?: string }).error
-      throw new Error(backendErr || STORE_UNAVAILABLE_MSG)
+      throw Object.assign(new Error(backendErr || STORE_UNAVAILABLE_MSG), { status: response.status })
     }
     if (!isJSON) {
       // 未配置外部商城反代时，静态托管/反向代理可能把 /store-api/* 回退到前端 HTML。
-      throw new Error(STORE_UNAVAILABLE_MSG)
+      throw Object.assign(new Error(STORE_UNAVAILABLE_MSG), { status: response.status })
     }
     const body = await response.json().catch(() => null)
-    if (!body || typeof body !== 'object') throw new Error('续费接口响应格式异常，请稍后重试')
-    if (!response.ok) throw new Error((body as { error?: string }).error || `请求失败（${response.status}）`)
+    if (!body || typeof body !== 'object') throw Object.assign(new Error('续费接口响应格式异常，请稍后重试'), { status: response.status })
+    if (!response.ok) throw Object.assign(new Error((body as { error?: string }).error || `请求失败（${response.status}）`), { status: response.status })
     return body as T
   } catch (err) {
     if (timedOut) throw new Error('续费接口响应超时，请检查网络或稍后重试')
@@ -105,15 +107,9 @@ function sameOriginPath(path: string | undefined): string | undefined {
   return safeSameOriginPath(path)
 }
 
-// 支付跳转链接只放行绝对 http/https 且拒绝控制字符，防止后端返回异常协议注入恶意脚本链接。
+// 支付跳转链接与外部回退地址统一复用安全外链校验，仅放行绝对 http/https 且拒绝控制字符。
 function safeExternalUrl(value: string | undefined): string | undefined {
-  if (!value || /[\u0000-\u001f\u007f]/.test(value)) return undefined
-  try {
-    const parsed = new URL(value.trim())
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : undefined
-  } catch {
-    return undefined
-  }
+  return safeExternalHttpUrl(value)
 }
 
 function maskEmail(email: string): string {
@@ -144,6 +140,8 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
   const [voucher, setVoucher] = useState('')
   const [siteKey, setSiteKey] = useState('')
   const [captcha, setCaptcha] = useState('')
+  const [captchaAttempt, setCaptchaAttempt] = useState(0)
+  const [captchaError, setCaptchaError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [checkout, setCheckout] = useState<Checkout | null>(null)
   const [status, setStatus] = useState('')
@@ -151,6 +149,7 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
   // 2026-11-06：轮询已停止（订单取消或超过 30 分钟）。原来停了之后转圈和「付款后会自动确认」一直留着，
   // 买家以为还在等，实际页面已经不会再更新。
   const [pollStopped, setPollStopped] = useState(false)
+  const [copyHint, setCopyHint] = useState('')
   const [copiedKey, flashCopied] = useCopiedFlash()
   const widgetEl = useRef<HTMLDivElement | null>(null)
   const widgetID = useRef<string | null>(null)
@@ -203,7 +202,7 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
   }, [target.order, target.sub, adopt])
 
   const pickProduct = (p: CatalogProduct) => {
-    setProductID(p.id); setProductName(p.name); setDenominations(p.denominations); setDenomID(p.denominations[0].id)
+    setProductID(p.id); setProductName(p.name); setDenominations(p.denominations); setDenomID(p.denominations[0].id); setError('')
   }
 
   // 只有续费信息本身读取失败才算加载失败；下单前的校验错误不影响人机验证框。
@@ -215,32 +214,43 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
        ...(denom.voucher_available ? [{ id: 'VOUCHER', label: '兑换码', amount: denom.voucher_amount, currency: 'CNY' }] : [])]
     : []), [denom])
   useEffect(() => {
-    if (methods.length > 0 && !methods.some((m) => m.id === method)) setMethod(methods[0].id)
+    if (methods.length === 0) {
+      if (method) setMethod('')
+      return
+    }
+    if (!methods.some((m) => m.id === method)) setMethod(methods[0].id)
   }, [methods, method])
 
-  // 人机验证：选好方式、还没下单时渲染；下单后移除，失败时重置以便重试。
+  // 人机验证：选好方式、还没下单时渲染；下单后移除，加载失败支持点击「暂不可用」恢复，避免下单按钮永久锁死。
   useEffect(() => {
     if (!siteKey || checkout || loading || loadFailed) return
     let disposed = false
+    setCaptchaError('')
     void loadTurnstile().then((ts) => {
       if (disposed || !widgetEl.current || widgetID.current) return
       widgetID.current = ts.render(widgetEl.current, {
         sitekey: siteKey,
         language: 'zh-cn',
-        callback: (token: string) => { if (!disposed) setCaptcha(token) },
+        callback: (token: string) => { if (!disposed) { setCaptcha(token); setCaptchaError('') } },
         'expired-callback': () => { if (!disposed) setCaptcha('') },
-        'error-callback': () => { if (!disposed) setCaptcha('') },
+        'error-callback': () => { if (!disposed) { setCaptcha(''); setCaptchaError('人机验证异常，请重新加载后再试') } },
       })
-    }).catch((err: Error) => { if (!disposed) setError(err.message) })
+    }).catch((err: Error) => {
+      if (!disposed) {
+        const msg = err.message || '人机验证加载失败，请点击重试'
+        setCaptchaError(msg)
+        setError(msg)
+      }
+    })
     return () => {
       disposed = true
       if (widgetID.current && window.turnstile) window.turnstile.remove?.(widgetID.current)
       widgetID.current = null
     }
-  }, [siteKey, checkout, loading, loadFailed])
+  }, [siteKey, checkout, loading, loadFailed, captchaAttempt])
 
   const submit = useCallback(async () => {
-    if (!denom || !method) return
+    if (submitting || !denom || !method) return
     if (siteKey && !captcha) { setError('请先完成人机验证'); return }
     if (method === 'VOUCHER' && !voucher.trim()) { setError('请输入兑换码'); return }
     if (adopt && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) { setError('请填写有效的邮箱，用于接收订单与以后续费'); return }
@@ -285,9 +295,9 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
       window.clearTimeout(timer)
       if (mountedRef.current) setSubmitting(false)
     }
-  }, [denom, method, siteKey, captcha, voucher, productID, email, target.order, target.sub, adopt])
+  }, [submitting, denom, method, siteKey, captcha, voucher, productID, email, target.order, target.sub, adopt])
 
-  // 轮询订单：fulfilled = 续期已写入订阅；cancelled = 超时未付款。
+  // 轮询订单：fulfilled = 续期已写入订阅；cancelled = 超时未付款；401/403/404 立刻中止避免无效空转。
   useEffect(() => {
     if (!checkout || done) return
     const started = Date.now()
@@ -309,8 +319,15 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
         }
         if (order.status === 'cancelled') { setError('订单已取消（超时未付款），请重新下单'); setPollStopped(true); return }
         setStatus(order.status_label || order.status)
-      } catch {
-        // 网络抖动：下一轮再查
+      } catch (err) {
+        if (stopped) return
+        const code = (err as StoreHttpError | null)?.status
+        if (code === 401 || code === 403 || code === 404) {
+          setError(err instanceof Error ? err.message : '订单状态查询凭证已失效，请关闭后刷新页面确认')
+          setPollStopped(true)
+          return
+        }
+        // 网络抖动或临时 5xx：下一轮再查
       }
       if (stopped) return
       if (Date.now() - started < POLL_LIMIT_MS) timer = window.setTimeout(() => void tick(), POLL_MS)
@@ -326,7 +343,12 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
   const safeFallbackUrl = safeExternalUrl(fallbackUrl)
 
   async function copyPayField(key: string, value: string) {
-    if (await copyToClipboard(value)) flashCopied(key)
+    if (await copyToClipboard(value)) {
+      setCopyHint('')
+      flashCopied(key)
+    } else {
+      setCopyHint('浏览器阻止了自动复制，请长按或手动选中上方金额/地址复制')
+    }
   }
 
   return (
@@ -373,6 +395,7 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
           {pollStopped
             ? <p className="form-note">已停止自动查询付款状态（{status || '未确认'}）。如果已经付款，刷新本页即可看到新的到期时间；没付款请关闭后重新下单。</p>
             : <p className="form-note"><Loader2 size={13} className="spin" /> {status}（付款后会自动确认，请勿关闭本窗口）</p>}
+          {copyHint && <p className="form-note">{copyHint}</p>}
           {error && <p className="form-error">{error}</p>}
         </div>
       ) : error && denominations.length === 0 ? (
@@ -434,7 +457,23 @@ export function RenewDialog({ target, fallbackUrl, onClose, onRenewed }: {
             </label>
           )}
           {method === 'PAYPAL' && <p className="form-note">PayPal 需要在它自己的页面付款，下单后会在新标签页打开。</p>}
-          {siteKey && <div ref={widgetEl} className="renew-captcha" />}
+          {siteKey && (
+            <div className="renew-captcha-wrap">
+              <div ref={widgetEl} className="renew-captcha" />
+              {captchaError && (
+                <div className="renew-captcha-error">
+                  <span className="form-note">{captchaError}</span>
+                  <button
+                    type="button"
+                    className="button button-quiet button-compact"
+                    onClick={() => { setCaptcha(''); setCaptchaError(''); setError(''); setCaptchaAttempt((n) => n + 1) }}
+                  >
+                    重新加载人机验证
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
           {error && <p className="form-error">{error}</p>}
           <div className="modal-actions">
             <button className="button button-quiet" onClick={onClose}>取消</button>

@@ -136,9 +136,13 @@ func xuiCall(ctx context.Context, client *http.Client, req xuiRequest) ([]byte, 
 		return nil, 0, nil, fmt.Errorf("连接 3X-UI 面板失败: %w", err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const xuiBodyLimit = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, xuiBodyLimit+1))
 	if err != nil {
 		return nil, resp.StatusCode, nil, errors.New("读取 3X-UI 响应失败")
+	}
+	if len(raw) > xuiBodyLimit {
+		return nil, resp.StatusCode, nil, fmt.Errorf("3X-UI 响应超过 %d KiB，已拒绝解析", xuiBodyLimit>>10)
 	}
 	return raw, resp.StatusCode, resp.Cookies(), nil
 }

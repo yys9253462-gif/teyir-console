@@ -65,3 +65,17 @@ func TestDialCheckedIPsRejectsEmptyList(t *testing.T) {
 		t.Fatal("空地址列表应当返回错误")
 	}
 }
+
+// 验证显式指定 tcp4/tcp6 时只拨对应地址族，避免异族拨号把真实连接错误覆盖成协议不匹配。
+func TestDialCheckedIPsFiltersByNetworkFamily(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	onlyV6 := []net.IPAddr{{IP: net.ParseIP("2001:db8::1")}}
+	if _, err := DialCheckedIPs(ctx, &net.Dialer{Timeout: 200 * time.Millisecond}, "tcp4", "443", onlyV6); err == nil {
+		t.Fatal("tcp4 下仅有 IPv6 候选时应直接报错")
+	}
+	onlyV4 := []net.IPAddr{{IP: net.ParseIP("198.51.100.1")}}
+	if _, err := DialCheckedIPs(ctx, &net.Dialer{Timeout: 200 * time.Millisecond}, "tcp6", "443", onlyV4); err == nil {
+		t.Fatal("tcp6 下仅有 IPv4 候选时应直接报错")
+	}
+}

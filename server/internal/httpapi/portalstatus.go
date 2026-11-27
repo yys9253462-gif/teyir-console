@@ -33,12 +33,12 @@ import (
 	"time"
 )
 
-// portalStatusProbeCount 是 portal-status 的探测路数。
+// portalStatusProbeCount 是 portal-status 的探测路数（含 anytls-status 共 10 路）。
 //
-// ⚠️ 它与 probes 表的长度是**同一件事**，必须一起改：加端点时忘记调这里，
+// 它与 probes 表的长度是同一件事，必须一起改：加端点时忘记调这里，
 // 整批预算就会停留在旧路数上（见 portalStatusBudget 的推导）。
 // 端到端测试 TestPortalStatusProbeCountMatchesTable 会钉住这一点。
-const portalStatusProbeCount = 9
+const portalStatusProbeCount = 10
 
 // portalStatusProbeTimeout 是**单路**探测的上限，比整批预算小得多。
 //
@@ -285,7 +285,7 @@ func (s *Server) probePortalEndpoint(ctx context.Context, target *portalWebTarge
 		if isPortalEndpointMissing(err.Error()) {
 			return portalStatusResult{State: "unsupported", Error: "节点门户尚未提供此端点，请升级节点门户"}
 		}
-		return portalStatusResult{State: "unknown", Error: err.Error()}
+		return portalStatusResult{State: "unknown", Error: redactPortalError(err.Error(), target)}
 	}
 	payload := build()
 	if err := json.Unmarshal(envelope.Data, payload); err != nil {

@@ -97,7 +97,11 @@ func (s *Server) nodeIPPurity(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceReadLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := r.PathValue("id")
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
+		return
+	}
 
 	// 节点是否存在（含 deleted_at 过滤），顺带拿出当前 IP 做 stale 判定。
 	currentIP, err := s.nodeIPForPurity(r.Context(), nodeID)
@@ -136,8 +140,8 @@ func (s *Server) refreshNodeIPPurity(w http.ResponseWriter, r *http.Request) {
 	if !s.enforceWriteLimit(w, claims.Subject) {
 		return
 	}
-	nodeID := r.PathValue("id")
-	if !uuidPattern.MatchString(nodeID) {
+	nodeID, ok := canonicalUUID(r.PathValue("id"))
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "节点不存在"})
 		return
 	}
@@ -375,12 +379,18 @@ func (s *Server) checkAndStorePurity(ctx context.Context, nodeID string, forceAP
 		verdict.Proxy, verdict.VPN, verdict.Abuser, verdict.ASN, verdict.ASNOrg,
 		string(raw), verdict.Source, verdict.ScoreSource, verdict.Partial)
 	if err != nil {
-		return ipPurityRow{}, err
+		if s.logger != nil {
+			s.logger.Warn("ip purity: store verdict failed", "node_id", nodeID, "error", err)
+		}
+		return ipPurityRow{}, errors.New("纯净度检测结果写入数据库失败，请查看服务端日志")
 	}
 	s.checkAndStoreNative(ctx, nodeID, verdict.IP)
 	row, _, err := s.loadIPPurity(ctx, nodeID)
 	if err != nil {
-		return ipPurityRow{}, err
+		if s.logger != nil {
+			s.logger.Warn("ip purity: reload verdict failed", "node_id", nodeID, "error", err)
+		}
+		return ipPurityRow{}, errors.New("读取纯净度检测结果失败，请查看服务端日志")
 	}
 	return row, nil
 }
@@ -405,7 +415,7 @@ func (s *Server) loadIPPurity(ctx context.Context, nodeID string) (ipPurityRow, 
 SELECT COALESCE(ip,''), COALESCE(connection_type,'unknown'), is_dual_isp, fraud_score,
        is_proxy, is_vpn, is_abuser, COALESCE(asn,''), COALESCE(asn_org,''),
        COALESCE(raw, '{}'::jsonb), COALESCE(source,''), COALESCE(error,''), checked_at,
-       reg_country, reg_registry, geo_country, is_native, score_source
+       COALESCE(reg_country,''), COALESCE(reg_registry,''), COALESCE(geo_country,''), is_native, COALESCE(score_source,'')
 FROM node_ip_purity WHERE node_id = $1::uuid`, nodeID).Scan(
 		&row.IP, &row.ConnectionType, &row.DualISP, &row.FraudScore,
 		&row.Proxy, &row.VPN, &row.Abuser, &row.ASN, &row.ASNOrg,

@@ -31,7 +31,6 @@ fi
 cd "$ROOT"
 
 STAMP="$(date +%Y%m%d-%H%M%S)"
-PROJECT="$(basename "$ROOT")"
 BACKUP_DIR="/opt"
 
 # REF 在下面「拉代码」一节里才真正确定：默认沿用当前分支，而不是写死 main。
@@ -39,6 +38,34 @@ BACKUP_DIR="/opt"
 
 log()  { echo "==> $*"; }
 warn() { echo "!! $*" >&2; }
+
+DUMP_ERR=""
+DUMP_PARTIAL=""
+cleanup_tmp() {
+  [ -n "$DUMP_ERR" ] && rm -f "$DUMP_ERR" 2>/dev/null || true
+  [ -n "$DUMP_PARTIAL" ] && rm -f "$DUMP_PARTIAL" 2>/dev/null || true
+}
+trap cleanup_tmp EXIT
+
+# 清理旧备份（保留最新 keep 份；不依赖 xargs -r，且在 pipefail 下零匹配安全）
+prune_backups() {
+  local keep="$1" dir="$2" prefix="$3" suffix="$4"
+  local -a files=()
+  local old_nullglob=0
+  shopt -q nullglob && old_nullglob=1
+  shopt -s nullglob
+  files=("$dir/$prefix"*"$suffix")
+  if [ "$old_nullglob" -eq 0 ]; then shopt -u nullglob; fi
+  [ "${#files[@]}" -gt "$keep" ] || return 0
+  local f idx=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    idx=$((idx + 1))
+    if [ "$idx" -gt "$keep" ]; then
+      rm -f "$f" 2>/dev/null || true
+    fi
+  done < <(ls -1t -- "${files[@]}" 2>/dev/null || true)
+}
 
 # ------------------------------------------------------------------ 预检
 [ -d .git ] || { warn "当前目录不是 git 仓库：$ROOT"; exit 1; }
@@ -62,14 +89,26 @@ if grep -Eq '^[[:space:]]*-[[:space:]]*[^#]*:/api(:ro|:rw)?[[:space:]]*$' docker
   exit 1
 fi
 
-# 从 .env 读取配置项：兼容前后空白、单双引号与行内注释，并去除 CR 回车符。
+# 从 .env 读取配置项：兼容 export 前缀、前后空白、单双引号（含闭合后行内注释）与无引号行内注释，并去除 CR 回车符。
 read_env() {
   local raw
-  raw="$(sed -n "s/^[[:space:]]*$1=//p" .env 2>/dev/null | tail -1 | tr -d '\r' || true)"
-  # 剥离未加引号时的行内注释（空白后的 # 开头部分）
-  raw="${raw%%[[:space:]]#*}"
-  # 去除首尾空白与外层单双引号
-  raw="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'$/\1/")"
+  raw="$(sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?$1=//p" .env 2>/dev/null | tail -1 | tr -d '\r' || true)"
+  raw="$(printf '%s' "$raw" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+  case "$raw" in
+    \"*\"*)
+      raw="${raw#\"}"
+      raw="${raw%%\"*}"
+      ;;
+    \'*\'*)
+      raw="${raw#\'}"
+      raw="${raw%%\'*}"
+      ;;
+    *)
+      # 剥离未加引号时的行内注释（空白后的 # 开头部分）
+      raw="${raw%%[[:space:]]#*}"
+      raw="$(printf '%s' "$raw" | sed -e 's/[[:space:]]*$//')"
+      ;;
+  esac
   printf '%s' "$raw"
 }
 
@@ -92,6 +131,7 @@ resolve_health_host() {
   esac
 }
 
+PROJECT="$(read_env COMPOSE_PROJECT_NAME)"; PROJECT="${PROJECT:-$(basename "$ROOT")}"
 API_PORT="$(read_env API_PORT)"; API_PORT="${API_PORT:-8080}"
 API_BIND="$(read_env API_BIND)"; API_BIND="${API_BIND:-127.0.0.1}"
 HEALTH_HOST="$(resolve_health_host "$API_BIND")"
@@ -108,7 +148,7 @@ else
   BK="$BACKUP_DIR/$PROJECT-backup-$STAMP.tar.gz"
   log "备份到 $BK"
   tar --exclude='./.git' --exclude='./node_modules' --exclude='./dist' -czf "$BK" .
-  ls -1t "$BACKUP_DIR/$PROJECT-backup-"*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+  prune_backups 5 "$BACKUP_DIR" "${PROJECT}-backup-" ".tar.gz"
   log "保留备份数: $(ls -1 "$BACKUP_DIR/$PROJECT-backup-"*.tar.gz 2>/dev/null | wc -l | tr -d ' ')"
 fi
 
@@ -132,6 +172,12 @@ fi
 #   3. 切换前先确认目标 ref 在本地是否存在，避免 checkout 失败后 reset 到错误的对象。
 if [ -n "${1:-}" ]; then
   REF="$1"
+  case "$REF" in
+    -*|*..*|*//*)
+      warn "非法分支参数 '$REF'（禁止以连字符开头或包含 .. / //）"
+      exit 1
+      ;;
+  esac
 else
   CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
   if [ -z "$CURRENT_BRANCH" ] || [ "$CURRENT_BRANCH" = "HEAD" ]; then
@@ -223,18 +269,23 @@ if [ "${DEPLOY_NO_DB_BACKUP:-0}" = "1" ]; then
 else
   DUMP="$BACKUP_DIR/$PROJECT-db-$STAMP.dump"
   DUMP_ERR="$(mktemp)"
+  DUMP_PARTIAL="$DUMP"
   log "备份数据库到 $DUMP"
   if docker compose exec -T db pg_dump -U nodeops -d nodeops > "$DUMP" 2>"$DUMP_ERR" && [ -s "$DUMP" ]; then
+    DUMP_PARTIAL=""
     rm -f "$DUMP_ERR"
+    DUMP_ERR=""
     log "数据库备份完成: $(du -h "$DUMP" | cut -f1)"
-    ls -1t "$BACKUP_DIR/$PROJECT-db-"*.dump 2>/dev/null | tail -n +4 | xargs -r rm -f
+    prune_backups 3 "$BACKUP_DIR" "${PROJECT}-db-" ".dump"
   else
     rm -f "$DUMP"
+    DUMP_PARTIAL=""
     warn "数据库备份失败；为避免「改坏了没有退路」，本次不继续迁移"
     if [ -s "$DUMP_ERR" ]; then
       sed 's/^/    /' "$DUMP_ERR" >&2 || true
     fi
     rm -f "$DUMP_ERR"
+    DUMP_ERR=""
     warn "确认可以冒险时用 DEPLOY_NO_DB_BACKUP=1 重跑"
     exit 1
   fi

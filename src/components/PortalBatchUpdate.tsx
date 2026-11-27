@@ -27,6 +27,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
   const readOnly = !isAdminSession()
   const [history, setHistory] = useState<Pick<PortalUpdateBatch, 'id' | 'status' | 'created_at' | 'updated_at'>[]>([])
   const [starting, setStarting] = useState(false)
+  const [canceling, setCanceling] = useState(false)
   const [error, setError] = useState('')
   const [status, setStatus] = useState<PortalUpdateStatus | null>(null)
   const [checking, setChecking] = useState(false)
@@ -75,11 +76,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
     let timer: ReturnType<typeof setTimeout> | undefined
     const id = batch.id
     async function poll() {
-      if (!alive) return
-      if (document.hidden) {
-        timer = setTimeout(poll, 3000)
-        return
-      }
+      if (!alive || document.hidden) return
       try {
         const value = await api.portalUpdateBatch(id)
         if (!alive) return
@@ -89,7 +86,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
         if (!alive) return
         setError(`进度读取失败，后台任务仍可能在执行：${err instanceof Error ? err.message : String(err)}`)
       }
-      if (alive) timer = setTimeout(poll, 3000)
+      if (alive && !document.hidden) timer = setTimeout(poll, 3000)
     }
     const onVisible = () => {
       if (!document.hidden && alive) {
@@ -98,7 +95,7 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
       }
     }
     document.addEventListener('visibilitychange', onVisible)
-    timer = setTimeout(poll, 1000)
+    if (!document.hidden) timer = setTimeout(poll, 1000)
     return () => {
       alive = false
       clearTimeout(timer)
@@ -184,8 +181,9 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
       {batch && !running && retryable.length > 0 && <button className="button button-quiet" disabled={readOnly || starting} onClick={() => setSelected(retryable.slice(0, 20).map(item => item.node_id))}>选择上次未成功的（{retryable.length}）</button>}
       <button className="button button-quiet" disabled={readOnly || running || starting || !selected.length} onClick={() => setSelected([])}>清空选择</button>
       <button className="button button-primary" disabled={readOnly || running || starting || !selected.length || selected.length > 20} onClick={() => void start()}>{starting ? '创建任务…' : running ? '后台更新中…' : `开始更新（${selected.length}）`}</button>
-      {running && !readOnly && <button className="button button-quiet" disabled={batch?.cancel_requested} onClick={async () => {
-        if (!batch || !await askConfirm('当前这台完成后，停止更新剩余节点？')) return
+      {running && !readOnly && <button className="button button-quiet" disabled={batch?.cancel_requested || canceling} onClick={async () => {
+        if (!batch || canceling || !await askConfirm('当前这台完成后，停止更新剩余节点？')) return
+        setCanceling(true)
         try {
           const result = await api.cancelPortalUpdateBatch(batch.id)
           notify(result.message)
@@ -193,8 +191,10 @@ export function PortalBatchUpdate({ nodes, onClose, notify }: {
           if (mountedRef.current) setBatch(latest)
         } catch (err) {
           if (mountedRef.current) setError(err instanceof Error ? err.message : String(err))
+        } finally {
+          if (mountedRef.current) setCanceling(false)
         }
-      }}>{batch?.cancel_requested ? '已请求停止' : '停止剩余节点'}</button>}
+      }}>{canceling ? '正在请求停止…' : batch?.cancel_requested ? '已请求停止' : '停止剩余节点'}</button>}
     </div>
     {readOnly && <p>仅管理员可以发起或停止批量更新，当前账号只能查看进度。</p>}
     {selected.length > 20 && <p style={{ color: 'var(--amber-text)' }}>每批最多 20 台。</p>}
