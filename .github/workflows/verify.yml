@@ -51,10 +51,10 @@ jobs:
           npm run build
       - name: 校验前端接口契约
         run: node tests/ops-contract.cjs
-      - name: 校验部署脚本语法与分支选择单元测试
+      - name: 校验安装与部署脚本语法及单元测试
         run: |
-          bash -n deploy.sh deploy/update.sh
-          python3 -m unittest tests/deploy-update-ref-test.py
+          bash -n install.sh deploy.sh deploy/update.sh
+          python3 -m unittest tests/deploy-update-ref-test.py tests/install-script-test.py
       - name: 校验容器编排配置语法
         env:
           POSTGRES_PASSWORD: ci-fixture-only-password

@@ -47,7 +47,46 @@ VPS 与 Hysteria2 节点运维控制台。Go API + PostgreSQL + React 前端，�
 
 ## 部署
 
-### 方式一：Docker Compose（推荐）
+### 方式一：一条命令交互菜单式安装（推荐）
+
+在**目标 Linux 服务器**上直接执行（支持 Debian / Ubuntu / CentOS / RHEL / Rocky / Alma / Alpine，自动检测并安装 `git` / `docker` / `docker compose`，自动避让冲突端口，自动识别已有 Caddy 或输出 Nginx 反代配置）：
+
+**Root 用户（终端提示符为 `#`）**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yys9253462-gif/teyir-console/main/install.sh -o ~/teyir-install.sh && bash ~/teyir-install.sh
+```
+
+**普通用户（终端提示符为 `$`）**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/yys9253462-gif/teyir-console/main/install.sh -o ~/teyir-install.sh && sudo bash ~/teyir-install.sh
+```
+
+> 若服务器访问 `raw.githubusercontent.com` 不畅，可改用备用源（`cdn.jsdelivr.net`）：
+> ```bash
+> curl -fsSL https://cdn.jsdelivr.net/gh/yys9253462-gif/teyir-console@main/install.sh -o ~/teyir-install.sh && bash ~/teyir-install.sh
+> ```
+> 安装完成后脚本会自动备份到安装目录并注册全局快捷命令 `teyir`（普通用户用 `sudo teyir`），日后随时输入 `teyir` 即可再次打开交互管理菜单。
+
+交互菜单内置以下功能：
+1. **一键安装 / 重新配置部署**：仅需回答 2–3 个问题（访问方式与域名、初始管理员账号、可选高级项），其余密钥与端口自动安全生成；重配时自动保留既有 `CREDENTIAL_KEY` 与 `POSTGRES_PASSWORD`。
+2. **一键升级更新**：自动备份配置与数据库 → 拉取最新源码 → 重建并执行 `migrate` 迁移 → 重建 `api` / `web` → 容器内部健康验收。
+3. **运行状态总览**：查看容器状态、容器内部健康探针、公网 HTTPS 连通性与证书到期时间（只读操作不强制 root）。
+4. **修改配置子菜单**：单独调整域名/访问方式、端口、默认订阅名、周期采集开关或外部联动地址，改共享 Caddyfile 前自动备份、校验、热重载，失败自动回滚。
+5. **服务运维子菜单**：启停、重启、查看 `api`/`web`/`db` 日志、立即备份、手动触发数据库迁移。
+6. **检查远端更新** / **安全卸载**（默认保留数据库卷与安装目录，彻底清除需二次确认或 `--purge`）。
+
+全自动与预演模式（适合脚本化或批量部署）：
+
+```bash
+bash ~/teyir-install.sh --dry-run --install                                    # 仅预演不改系统
+bash ~/teyir-install.sh --yes                                                  # 全自动默认安装
+bash ~/teyir-install.sh --yes --domain panel.example.com                       # 全自动绑域名配 HTTPS
+bash ~/teyir-install.sh --status | --upgrade | --check-update | --uninstall    # 直接调用维护命令
+```
+
+### 方式二：手工 Docker Compose 部署
 
 ```bash
 cp .env.example .env
@@ -94,7 +133,7 @@ DEPLOY_NO_DB_BACKUP=1 ./deploy.sh  # 跳过迁移前数据库转储（慎用）
 健康检查端口从 `.env` 的 `API_PORT` 读（默认 8080）。曾经在脚本里写死过旧测试端口，
 于是每次部署都以「健康检查超时」收场，而服务其实早就起来了——别再写死它。
 
-### 方式二：宿主机直装（systemd）
+### 方式三：宿主机直装（systemd）
 
 不想用 Docker 时，把 Go 二进制和前端静态文件直接放宿主机：
 
